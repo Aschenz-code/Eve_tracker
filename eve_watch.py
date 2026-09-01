@@ -2008,6 +2008,214 @@ def cmd_doctor(args):
     return bad
 
 
+EVENT_GROUPS = {
+    "overview": lambda r: r["region"].startswith("overview"),
+    "signatures": lambda r: r["region"] in ("sigs",) or r["region"] == "clipboard",
+    "dscan": lambda r: r["region"] == "dscan",
+    "structure": lambda r: r["region"] == "structure",
+    "system": lambda r: r["region"] in ("-", ""),
+}
+ALERTING = {"arrive", "change", "present", "new_sig", "dscan"}
+
+
+LEGACY_COLS = [c for c in CSV_COLS if c != "client"]
+
+
+def migrate_csv():
+    """Rewrite events.csv if its header predates a column being added.
+
+    The header is only written when the file does not exist, so adding the
+    client column left every later row one field wider than the header it was
+    appended under - fine for a tolerant reader, but the file itself opens
+    misaligned in a spreadsheet. Rewrite it once, keeping a .bak.
+    """
+    if not os.path.exists(CSVFILE):
+        return False
+    try:
+        with open(CSVFILE, "r", encoding="utf-8", newline="") as fh:
+            rows = list(csv.reader(fh))
+    except OSError:
+        return False
+    if not rows or rows[0] == CSV_COLS:
+        return False
+    body = [r for r in rows[1:] if r]
+    fixed = []
+    for r in body:
+        if len(r) == len(CSV_COLS):
+            fixed.append(dict(zip(CSV_COLS, r)))
+        elif len(r) == len(LEGACY_COLS):
+            d = dict(zip(LEGACY_COLS, r))
+            d["client"] = ""
+            fixed.append(d)
+    try:
+        shutil_copy = CSVFILE + ".bak"
+        with open(shutil_copy, "w", encoding="utf-8", newline="") as fh:
+            csv.writer(fh).writerows(rows)
+        with open(CSVFILE, "w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=CSV_COLS, extrasaction="ignore")
+            w.writeheader()
+            for d in fixed:
+                w.writerow(d)
+    except OSError as exc:
+        log(f"  csv migration failed: {exc}")
+        return False
+    log(f"  events.csv rewritten with the current columns "
+        f"({len(fixed)} rows; previous file kept as events.csv.bak)")
+    return True
+
+
+def read_events(limit=4000):
+    """Rows from events.csv, newest first. Tolerates both column layouts."""
+    if not os.path.exists(CSVFILE):
+        return []
+    try:
+        with open(CSVFILE, "r", encoding="utf-8", newline="") as fh:
+            raw = list(csv.reader(fh))
+    except OSError:
+        return []
+    if not raw:
+        return []
+    # Map by field count rather than trusting the header, which may predate a
+    # column being added and therefore mislabels every row written since.
+    rows = []
+    for r in raw[1:]:
+        if len(r) == len(CSV_COLS):
+            rows.append(dict(zip(CSV_COLS, r)))
+        elif len(r) == len(LEGACY_COLS):
+            d = dict(zip(LEGACY_COLS, r))
+            d["client"] = ""
+            rows.append(d)
+    out = []
+    for r in rows:
+        r.setdefault("client", "")
+        r["region"] = r.get("region") or "-"
+        out.append(r)
+    return out[-limit:][::-1]
+
+
+def cmd_events(args):
+    """Live view of events.csv, filterable by what produced them."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title("eve-watch - events")
+    root.configure(padx=10, pady=8)
+    root.geometry("1150x620")
+
+    top = tk.Frame(root)
+    top.pack(fill="x")
+    tk.Label(top, text="Show:", font=("Segoe UI", 9, "bold")).pack(side="left")
+    group_vars = {}
+    for name in EVENT_GROUPS:
+        v = tk.IntVar(value=1)
+        group_vars[name] = v
+        tk.Checkbutton(top, text=name, variable=v,
+                       command=lambda: refresh(force=True)).pack(side="left")
+    alerts_only = tk.IntVar(value=0)
+    tk.Checkbutton(top, text="alerts only", variable=alerts_only,
+                   command=lambda: refresh(force=True)).pack(side="left", padx=(16, 0))
+
+    tk.Label(top, text="client:").pack(side="left", padx=(16, 4))
+    client_var = tk.StringVar(value="all")
+    client_box = ttk.Combobox(top, textvariable=client_var, width=16,
+                              state="readonly", values=["all"])
+    client_box.pack(side="left")
+    client_box.bind("<<ComboboxSelected>>", lambda e: refresh(force=True))
+
+    tk.Label(top, text="find:").pack(side="left", padx=(16, 4))
+    search = tk.StringVar()
+    ent = tk.Entry(top, textvariable=search, width=22)
+    ent.pack(side="left")
+    ent.bind("<KeyRelease>", lambda e: refresh(force=True))
+
+    cols = ("time", "client", "region", "event", "detail")
+    tree = ttk.Treeview(root, columns=cols, show="headings", height=24)
+    for c, w in zip(cols, (150, 110, 95, 80, 640)):
+        tree.heading(c, text=c)
+        tree.column(c, width=w, anchor="w")
+    sb = ttk.Scrollbar(root, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=sb.set)
+    tree.pack(side="left", fill="both", expand=True, pady=(8, 0))
+    sb.pack(side="right", fill="y", pady=(8, 0))
+
+    tree.tag_configure("arrive", foreground="#c22")
+    tree.tag_configure("depart", foreground="#888")
+    tree.tag_configure("dscan", foreground="#06a")
+    tree.tag_configure("problem", foreground="#c80")
+
+    status = tk.Label(root, text="", font=("Segoe UI", 8), fg="#666")
+    status.pack(side="bottom", anchor="w")
+    shots = {}
+    seen = {"sig": None}
+
+    def open_shot(_event=None):
+        for iid in tree.selection():
+            path = shots.get(iid)
+            if path:
+                full = path if os.path.isabs(path) else os.path.join(HERE, path)
+                if os.path.exists(full):
+                    os.startfile(full)
+                else:
+                    status.config(text=f"snapshot missing: {path}")
+    tree.bind("<Double-1>", open_shot)
+
+    def refresh(force=False):
+        sig = None
+        if os.path.exists(CSVFILE):
+            st_ = os.stat(CSVFILE)
+            sig = (st_.st_mtime, st_.st_size)
+        if not force and sig == seen["sig"]:
+            return
+        seen["sig"] = sig
+        rows = read_events()
+
+        clients = sorted({r["client"] for r in rows if r["client"]})
+        client_box.configure(values=["all"] + clients)
+
+        wanted = [g for g, v in group_vars.items() if v.get()]
+        needle = search.get().strip().lower()
+        tree.delete(*tree.get_children())
+        shots.clear()
+        shown = 0
+        for r in rows:
+            group = next((g for g, fn in EVENT_GROUPS.items() if fn(r)), "system")
+            if group not in wanted:
+                continue
+            if alerts_only.get() and r.get("event") not in ALERTING:
+                continue
+            if client_var.get() != "all" and r["client"] != client_var.get():
+                continue
+            if needle and needle not in " ".join(
+                    (r.get("detail", ""), r["region"], r.get("event", ""),
+                     r["client"])).lower():
+                continue
+            ev = r.get("event", "")
+            tag = ("arrive" if ev in ("arrive", "present", "new_sig", "change")
+                   else "depart" if ev in ("depart", "clear")
+                   else "dscan" if ev == "dscan"
+                   else "problem" if ev in ("blind", "anchor_lost", "lost_alarm")
+                   else "")
+            iid = tree.insert("", "end", tags=(tag,), values=(
+                r.get("iso", "").replace("T", "  "), r["client"], r["region"],
+                ev, (r.get("detail", "") or "")[:220]))
+            if r.get("snapshot"):
+                shots[iid] = r["snapshot"]
+            shown += 1
+        status.config(text=f"{shown} of {len(rows)} events   "
+                           f"double-click a row to open its snapshot   "
+                           f"updated {dt.datetime.now():%H:%M:%S}")
+
+    def tick():
+        refresh()
+        root.after(int(args.every * 1000), tick)
+
+    tick()
+    if args.seconds:
+        root.after(int(args.seconds * 1000), root.destroy)
+    root.mainloop()
+
+
 def cmd_dash(args):
     """A window that keeps saying whether you are actually being watched."""
     import tkinter as tk
@@ -3116,6 +3324,12 @@ def main():
     sp.add_argument("--name")
     sp.add_argument("--client")
     sp.set_defaults(func=cmd_learn)
+
+    sp = sub.add_parser("events", help="live, filterable view of events.csv")
+    sp.add_argument("--every", type=float, default=2.0,
+                    help="seconds between checks for new events")
+    sp.add_argument("--seconds", type=float, help="auto-close (for testing)")
+    sp.set_defaults(func=cmd_events)
 
     sp = sub.add_parser("dash", help="live status window")
     sp.add_argument("--every", type=float, default=6.0,
