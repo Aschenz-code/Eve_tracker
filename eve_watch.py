@@ -1435,7 +1435,10 @@ def panel_geometry(panel, words, bounds, frame=None, threshold=110):
                          if 8 <= y - x <= 60]
             if band_gaps:
                 pitch = round(statistics.median(band_gaps))
-                measured = True
+                # One gap is one sample: a two-row list gave 19 where the rest of
+                # the client measured 20, and being a pixel out compounds down the
+                # list. Treat it as weak so it is reported rather than trusted.
+                measured = len(band_gaps) >= 2
 
     if pitch < head_h + 5:
         return {"error": f"row spacing came out implausibly small ({pitch}px for "
