@@ -73,8 +73,10 @@ TAG = ""                                   # client label prefixed to this proce
 
 PROFILES = {
     # how loudly to alert, by what you are doing at the time
-    "active": {"popup": False, "voice": True, "beeps": True, "repeat": 2},
-    "away":   {"popup": True, "voice": True, "beeps": True, "repeat": 3},
+    # One announcement each. Set repeat higher, or nag_until_ack, if you want
+    # an alert to keep going until you deal with it.
+    "active": {"popup": False, "voice": True, "beeps": True, "repeat": 1},
+    "away":   {"popup": True, "voice": True, "beeps": True, "repeat": 1},
     "silent": {"popup": False, "voice": False, "beeps": False, "repeat": 1},
 }
 
@@ -101,6 +103,7 @@ DEFAULTS = {
     "max_drift": None,       # px an anchor may be found from where it was set up
     "voice_name": None,      # substring of a TTS voice name, e.g. "Mark"
     "clipboard_sigs": True,  # parse EVE probe-scanner pastes for exact signature data
+    "nag_until_ack": False,  # keep repeating while an unacknowledged popup is up
 }
 
 CSV_COLS = ["iso", "unix", "client", "elapsed_s", "elapsed_hms", "region",
@@ -1156,7 +1159,8 @@ def raise_alarm(phrase, body, opts):
             if opts.voice:
                 speak(phrase)
             cycles += 1
-            if cycles >= opts.repeat and not (opts.popup and _popup_busy.is_set()):
+            nagging = getattr(opts, "nag_until_ack", False) and opts.popup
+            if cycles >= opts.repeat and not (nagging and _popup_busy.is_set()):
                 break
             time.sleep(0.6)
 
@@ -2933,6 +2937,8 @@ def cmd_watch(args):
     obs_dir = args.obs_dir or s.get("obs_dir")
     global VOICE
     VOICE = args.voice_name or s.get("voice_name")
+    if getattr(args, "nag_until_ack", None) is None:
+        args.nag_until_ack = s.get("nag_until_ack", False)
     mode = args.mode or read_mode(s.get("mode", "away"))
     if getattr(args, "quiet", False):
         mode = "silent"
@@ -3590,6 +3596,8 @@ def main():
     sp.add_argument("--no-voice", dest="voice", action="store_false")
     sp.add_argument("--no-popup", dest="popup", action="store_false")
     sp.add_argument("--no-beep", dest="beeps", action="store_false")
+    sp.add_argument("--nag-until-ack", dest="nag_until_ack", action="store_true",
+                    help="keep repeating until the popup is dismissed")
     sp.add_argument("--tag", help="label for this client in the log and csv")
     sp.add_argument("--voice-name", dest="voice_name",
                     help="TTS voice to use, e.g. Mark / Zira / David")
@@ -3598,7 +3606,8 @@ def main():
                          "voice + popup, silent = log only")
     sp.add_argument("--quiet", action="store_true",
                     help="log and snapshot everything, but make no noise at all")
-    sp.set_defaults(func=cmd_watch, popup=None, voice=None, beeps=None)
+    sp.set_defaults(func=cmd_watch, popup=None, voice=None, beeps=None,
+                    nag_until_ack=None)
 
     args = p.parse_args()
     args.func(args)
