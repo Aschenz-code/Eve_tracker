@@ -1503,10 +1503,24 @@ def cmd_calibrate(args):
     for r in regions:
         Image.fromarray(to_gray(crop(frame, r["anchor"]))).save(
             os.path.join(HERE, f"anchor_{slug(win['title'])}_{r['name']}.png"))
+    # Replace every calibratable region for this client, not just the ones found
+    # now: recalibrating with one fewer overview must drop the leftover, or it
+    # sits in the config forever reporting its anchor lost.
+    # ...but only for panel kinds that actually calibrated. A skipped panel (an
+    # empty d-scan draws no column headers) must not take its working region with
+    # it - that would delete configuration for something merely not visible now.
+    found_kinds = {re.sub(r"\d+$", "", r["name"]) for r in regions}
+    def replaceable(name):
+        return re.sub(r"\d+$", "", name) in found_kinds
+    dropped = [r["name"] for r in cfg["regions"]
+               if r.get("window") == win["title"] and replaceable(r["name"])
+               and r["name"] not in {x["name"] for x in regions}]
     keep = [r for r in cfg["regions"]
-            if r.get("window") != win["title"]
-            or r["name"] not in {x["name"] for x in regions}]
+            if r.get("window") != win["title"] or not replaceable(r["name"])]
     cfg["regions"] = keep + regions
+    if dropped:
+        print(f"Removed {len(dropped)} region(s) no longer present: "
+              f"{', '.join(sorted(dropped))}")
     save_config(cfg)
     print(f"\nWrote {len(regions)} region(s). Check them with:")
     print(f"    eve_watch.py shot --client {short_client(win['title'])!r}")
@@ -1838,7 +1852,40 @@ def cmd_pick(args):
     failure mode hardest to notice. Calibrate it from here instead.
     """
     import tkinter as tk
-    from tkinter import scrolledtext
+    from tkinter import scrolledtext, ttk
+
+    def with_progress(parent, caption, fn):
+        """Run fn on a worker thread behind an indeterminate progress bar."""
+        win = tk.Toplevel(parent)
+        win.title("working")
+        win.attributes("-topmost", True)
+        win.configure(padx=20, pady=16)
+        win.resizable(False, False)
+        tk.Label(win, text=caption, font=("Segoe UI", 10)).pack(anchor="w")
+        bar = ttk.Progressbar(win, mode="indeterminate", length=340)
+        bar.pack(pady=(10, 0))
+        bar.start(12)
+        holder = {}
+
+        def work():
+            try:
+                holder["value"] = fn()
+            except Exception as exc:
+                holder["value"] = (False, f"failed: {exc}")
+
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+
+        def poll():
+            if t.is_alive():
+                parent.after(120, poll)
+            else:
+                bar.stop()
+                win.destroy()
+
+        parent.after(120, poll)
+        parent.wait_window(win)
+        return holder.get("value", (False, "no result"))
 
     root = tk.Tk()
     root.title("eve-watch - clients")
@@ -1849,7 +1896,9 @@ def cmd_pick(args):
     state = {"status": None}
 
     def calibrate_dialog(title):
-        ok, text = _calibrate_report(title, apply=False)
+        ok, text = with_progress(
+            root, f"Reading the panels on {short_client(title)}...",
+            lambda: _calibrate_report(title, apply=False))
         win = tk.Toplevel(root)
         win.title(f"calibrate - {short_client(title)}")
         win.attributes("-topmost", True)
@@ -1861,8 +1910,10 @@ def cmd_pick(args):
         box.configure(state="disabled")
 
         def apply_now():
-            ok2, text2 = _calibrate_report(title, apply=True)
             win.destroy()
+            ok2, _text2 = with_progress(
+                root, f"Writing regions for {short_client(title)}...",
+                lambda: _calibrate_report(title, apply=True))
             rebuild()
             state["status"].config(
                 text=("Calibrated " + short_client(title)) if ok2
@@ -1952,11 +2003,23 @@ def cmd_pick(args):
                 r["enabled"] = on
                 off += 0 if on else 1
         save_config(cfg)
-        msg = (f"Saved: {len(chosen)} client(s)"
-               + (f", {off} region(s) switched off" if off else "")
-               + ". Watchers restart within a few seconds.")
-        state["status"].config(text=msg, fg="#060")
-        print(msg)
+        started = start_supervisor()
+        # give the supervisor a moment to act, then report what is actually up
+        def report(tries=0):
+            live = _watcher_pids()
+            if tries < 8 and len(live) == 0 and chosen:
+                state["status"].config(text="starting watchers...", fg="#666")
+                root.after(1200, lambda: report(tries + 1))
+                return
+            bits = [f"{len(chosen)} client(s) selected"]
+            if off:
+                bits.append(f"{off} region(s) off")
+            bits.append("supervisor started" if started else "supervisor already running")
+            bits.append(f"{len(live)} watcher(s) live")
+            msg = "Saved: " + ", ".join(bits)
+            state["status"].config(text=msg, fg="#060")
+            print(msg)
+        report()
 
     rebuild()
     if args.seconds:
@@ -2063,6 +2126,30 @@ def cmd_status(args):
         print("last log lines:")
         for line in tail:
             print("   " + line.rstrip())
+
+
+def _supervisor_pids():
+    """PIDs of any running `eve_watch.py supervise`."""
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+             "Where-Object { $_.CommandLine -like '*eve_watch*supervise*' } | "
+             "Select-Object -ExpandProperty ProcessId"],
+            capture_output=True, text=True, timeout=25,
+            creationflags=CREATE_NO_WINDOW)
+        return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def start_supervisor():
+    """Launch a detached supervisor if none is running. Returns True if started."""
+    if _supervisor_pids():
+        return False
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "supervise"],
+                     cwd=HERE, creationflags=CREATE_NO_WINDOW)
+    return True
 
 
 def _watcher_pids():
