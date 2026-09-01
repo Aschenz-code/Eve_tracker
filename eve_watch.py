@@ -1317,9 +1317,14 @@ def panel_geometry(panel, words, bounds):
              if y_lo < w["y"] < min(y_hi, y_lo + 170) and x_lo <= w["x"] < x_hi]
 
     # the header row is the first line under the title holding known header words
+    # Cluster by a tolerance derived from glyph height. A fixed bucket splits one
+    # rendered line into two - the header came back as "Type Corporation Alliance"
+    # and "Name" separately - and the stray half then looks like the first data row.
+    line_h = max(6, round(statistics.median([w["h"] for w in below]))) if below else 10
     rows = {}
-    for w in below:
-        rows.setdefault(round(w["y"] / 6) * 6, []).append(w)
+    for w in sorted(below, key=lambda w: w["y"]):
+        key = next((k for k in rows if abs(k - w["y"]) <= line_h * 0.9), w["y"])
+        rows.setdefault(key, []).append(w)
     header_y, header = None, {}
     for y in sorted(rows):
         hits = {}
@@ -1334,8 +1339,10 @@ def panel_geometry(panel, words, bounds):
         return {"error": "no column headers visible - the list is empty, so EVE "
                          "is not drawing them. Put something in it and re-run."}
 
-    # data rows: lines below the header, spaced evenly
-    data_ys = sorted({round(w["y"]) for w in below if w["y"] > header_y + 6})
+    # data rows start a full line below the header, never within it
+    head_h = max(w["h"] for w in header.values())
+    floor_y = header_y + head_h + 3
+    data_ys = sorted({round(w["y"]) for w in below if w["y"] >= floor_y})
     merged = []
     for y in data_ys:
         if not merged or y - merged[-1] > 4:
@@ -1371,6 +1378,13 @@ def panel_geometry(panel, words, bounds):
         key_width = None
 
     text_h = round(statistics.median([w["h"] for w in header.values()]))
+    if pitch < head_h + 5:
+        return {"error": f"row spacing came out implausibly small ({pitch}px for "
+                         f"{head_h}px text) - the header and first row were "
+                         f"probably confused. Put a couple of rows in the list "
+                         f"and re-run."}
+    if first_row < floor_y:
+        first_row = floor_y
     return {"header_y": header_y, "first_row": first_row, "pitch": pitch,
             "text_h": text_h,
             "measured_pitch": measured, "box_left": box_left,
