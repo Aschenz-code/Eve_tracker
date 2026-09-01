@@ -1861,6 +1861,270 @@ def _calibrate_report(client, apply=False):
         return False, buf.getvalue() + f"\nfailed: {exc}"
 
 
+def collect_health(capture=True):
+    """Everything that has to be true for an alert to reach you.
+
+    Most of the ways this tool fails are silent: a region whose anchor no longer
+    matches, a watcher that died, a client left minimised, a mode set to silent.
+    Each looks exactly like "nothing is happening".
+    """
+    cfg = load_config()
+    s = cfg["settings"]
+    selected = read_clients()
+    live = {h["title"]: h for h in list_windows("EVE - ")}
+    supervisors = _supervisor_pids()
+    watchers = _watcher_pids()
+    mode = read_mode(s.get("mode", "away"))
+    profile = PROFILES.get(mode, {})
+
+    checks = []
+
+    def add(ok, label, detail="", fix=""):
+        checks.append({"ok": ok, "label": label, "detail": detail, "fix": fix})
+
+    add(bool(cfg.get("regions")), "regions configured",
+        f"{len(cfg.get('regions', []))} across "
+        f"{len(configured_clients(cfg))} client(s)",
+        "run calibrate, or open pick.bat")
+    add(bool(selected), "clients selected for watching",
+        ", ".join(short_client(c) for c in selected) or "none",
+        "tick at least one client in pick.bat")
+    add(bool(supervisors), "supervisor running",
+        f"pid {supervisors}" if supervisors else "not running",
+        "press Save in pick.bat, or run: eve_watch.py supervise")
+    add(len(watchers) >= len(selected) and bool(selected), "a watcher per client",
+        f"{len(watchers)} running for {len(selected)} selected",
+        "the supervisor starts these; check it is running")
+    add(not os.path.exists(PAUSEFILE), "not paused",
+        "PAUSED file present" if os.path.exists(PAUSEFILE) else "running",
+        "run resume.bat")
+    add(any(profile.get(k) for k in ("beeps", "voice", "popup")),
+        "alerts can reach you", f"mode {mode!r}",
+        "switch mode with mode-active.bat")
+    add(ocr_engine() is not None, "OCR engine available", "",
+        "roster and d-scan regions need it; change Windows language settings")
+
+    fresh = ""
+    if os.path.exists(LOGFILE):
+        age = time.time() - os.path.getmtime(LOGFILE)
+        fresh = f"last wrote {age:.0f}s ago"
+        add(age < 120 or not watchers, "log is being written", fresh,
+            "watchers should log a heartbeat every 60s")
+
+    clients = []
+    for title in selected:
+        info = {"title": title, "short": short_client(title),
+                "running": title in live,
+                "minimized": live.get(title, {}).get("minimized", False),
+                "regions": []}
+        mine = [r for r in cfg.get("regions", []) if r.get("window") == title]
+        frame = None
+        if capture and info["running"] and not info["minimized"]:
+            try:
+                frame = one_frame(live[title]["hwnd"], 0.4)
+            except Exception as exc:
+                info["capture_error"] = str(exc)
+        for r in sorted(mine, key=lambda r: r["name"]):
+            row = {"name": r["name"], "mode": r.get("mode", "change"),
+                   "enabled": r.get("enabled", True), "state": "?", "detail": ""}
+            if not row["enabled"]:
+                row["state"] = "off"
+            elif frame is None:
+                row["state"] = "?"
+                row["detail"] = "client not visible"
+            else:
+                tr = Tracker(r, s)
+                box = tr.locate(frame)
+                if box is None:
+                    row["state"] = "LOST"
+                    row["detail"] = "anchor not found - re-calibrate"
+                else:
+                    row["state"] = "ok"
+                    if r.get("mode") == "change":
+                        learned = {k: apply_clip(v, r.get("clip", 0))
+                                   for k, v in load_values(
+                                       r["name"], True, title).items()}
+                        val = classify(signature(crop(frame, box),
+                                                 {"match": r.get("match", "mask"),
+                                                  "clip": r.get("clip", 0)},
+                                                 s["threshold"]),
+                                       learned, s["sensitivity"], 0,
+                                       r.get("match") == "ncc",
+                                       r.get("ncc_min", 0.95))[0] if learned else None
+                        if not learned:
+                            row["detail"] = "no values taught - reports '?'"
+                        elif val is None:
+                            row["detail"] = ("current value not recognised - "
+                                             "teach it with learn.bat")
+                        else:
+                            row["detail"] = f"reads {val!r}"
+                    else:
+                        rows = ocr_rows(to_image(crop(frame, box)),
+                                        s["ocr_scale"], r.get("key_width"))
+                        row["detail"] = f"{len(rows)} row(s) visible"
+            info["regions"].append(row)
+        clients.append(info)
+
+    return {"checks": checks, "clients": clients, "mode": mode}
+
+
+def cmd_doctor(args):
+    """Walk the whole chain and say what would stop an alert reaching you."""
+    h = collect_health(capture=not args.fast)
+    bad = 0
+    print()
+    for c in h["checks"]:
+        mark = "PASS" if c["ok"] else "FAIL"
+        bad += 0 if c["ok"] else 1
+        print(f"  [{mark}] {c['label']:32s} {c['detail']}")
+        if not c["ok"] and c["fix"]:
+            print(f"         -> {c['fix']}")
+
+    for info in h["clients"]:
+        print(f"\n  {info['short']}")
+        if not info["running"]:
+            print("     [FAIL] client is not running")
+            bad += 1
+            continue
+        if info["minimized"]:
+            print("     [FAIL] client is MINIMISED - it renders nothing to read")
+            bad += 1
+            continue
+        if info.get("capture_error"):
+            print(f"     [FAIL] cannot capture: {info['capture_error']}")
+            bad += 1
+            continue
+        if not info["regions"]:
+            print("     [FAIL] no regions configured - run calibrate")
+            bad += 1
+            continue
+        for r in info["regions"]:
+            mark = {"ok": "PASS", "LOST": "FAIL", "off": "----", "?": "????"}[r["state"]]
+            bad += 1 if r["state"] == "LOST" else 0
+            print(f"     [{mark}] {r['name']:12s} {r['mode']:8s} {r['detail']}")
+
+    print(f"\n  {bad} problem(s) found." if bad else
+          "\n  All clear - an alert would reach you.")
+    return bad
+
+
+def cmd_dash(args):
+    """A window that keeps saying whether you are actually being watched."""
+    import tkinter as tk
+
+    GREEN, RED, GREY, AMBER = "#0a7", "#c22", "#888", "#c80"
+
+    root = tk.Tk()
+    root.title("eve-watch - status")
+    root.attributes("-topmost", True)
+    root.configure(padx=14, pady=10)
+    head = tk.Label(root, text="checking...", font=("Segoe UI", 11, "bold"))
+    head.pack(anchor="w")
+    stamp = tk.Label(root, text="", font=("Segoe UI", 8), fg=GREY)
+    stamp.pack(anchor="w", pady=(0, 8))
+    body = tk.Frame(root)
+    body.pack(fill="both", expand=True)
+    busy = {"running": False}
+
+    def render(h):
+        for w in body.winfo_children():
+            w.destroy()
+        bad = sum(1 for c in h["checks"] if not c["ok"])
+        row = 0
+        for c in h["checks"]:
+            tk.Label(body, text="OK" if c["ok"] else "!!", width=3,
+                     font=("Consolas", 9, "bold"),
+                     fg=GREEN if c["ok"] else RED).grid(row=row, column=0, sticky="w")
+            tk.Label(body, text=c["label"], font=("Segoe UI", 9)
+                     ).grid(row=row, column=1, sticky="w")
+            tk.Label(body, text=c["detail"], font=("Segoe UI", 9), fg=GREY
+                     ).grid(row=row, column=2, sticky="w", padx=(10, 0))
+            row += 1
+
+        for info in h["clients"]:
+            row += 1
+            tk.Label(body, text=info["short"], font=("Segoe UI", 10, "bold")
+                     ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            if not info["running"]:
+                tk.Label(body, text="not running", fg=RED, font=("Segoe UI", 9)
+                         ).grid(row=row, column=2, sticky="w", pady=(8, 0))
+                bad += 1
+                row += 1
+                continue
+            if info["minimized"]:
+                tk.Label(body, text="MINIMISED - renders nothing", fg=RED,
+                         font=("Segoe UI", 9)).grid(row=row, column=2, sticky="w",
+                                                    pady=(8, 0))
+                bad += 1
+                row += 1
+                continue
+            row += 1
+            for r in info["regions"]:
+                mark, colour = {"ok": ("OK", GREEN), "LOST": ("!!", RED),
+                                "off": ("--", GREY), "?": ("??", AMBER)}[r["state"]]
+                if r["state"] == "LOST":
+                    bad += 1
+                tk.Label(body, text=mark, width=3, font=("Consolas", 9, "bold"),
+                         fg=colour).grid(row=row, column=0, sticky="w")
+                tk.Label(body, text=f"   {r['name']}  ({r['mode']})",
+                         font=("Segoe UI", 9)).grid(row=row, column=1, sticky="w")
+                tk.Label(body, text=r["detail"], font=("Segoe UI", 9), fg=GREY
+                         ).grid(row=row, column=2, sticky="w", padx=(10, 0))
+                row += 1
+
+        head.config(text="Watching normally" if bad == 0
+                    else f"{bad} problem(s) - you may not be covered",
+                    fg=GREEN if bad == 0 else RED)
+        stamp.config(text=f"checked {dt.datetime.now():%H:%M:%S}"
+                          f"   mode {h['mode']!r}   refreshing every "
+                          f"{args.every:.0f}s")
+
+    def refresh():
+        if busy["running"]:
+            return
+        busy["running"] = True
+        holder = {}
+
+        def work():
+            try:
+                holder["h"] = collect_health(capture=True)
+            except Exception as exc:
+                holder["error"] = str(exc)
+
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+
+        def poll():
+            if t.is_alive():
+                root.after(150, poll)
+                return
+            busy["running"] = False
+            if "h" in holder:
+                render(holder["h"])
+            else:
+                head.config(text=f"check failed: {holder.get('error')}", fg=RED)
+
+        root.after(150, poll)
+
+    def tick():
+        refresh()
+        root.after(int(args.every * 1000), tick)
+
+    bar = tk.Frame(root)
+    bar.pack(anchor="w", pady=(10, 0))
+    tk.Button(bar, text="Refresh", width=10, command=refresh).pack(side="left")
+    tk.Button(bar, text="Clients...", width=10,
+              command=lambda: subprocess.Popen(
+                  [sys.executable, os.path.abspath(__file__), "pick"],
+                  cwd=HERE, creationflags=CREATE_NO_WINDOW)).pack(side="left", padx=6)
+    tk.Button(bar, text="Close", width=10, command=root.destroy).pack(side="left")
+
+    tick()
+    if args.seconds:
+        root.after(int(args.seconds * 1000), root.destroy)
+    root.mainloop()
+
+
 def cmd_pick(args):
     """Choose clients and regions in a window.
 
@@ -2852,6 +3116,17 @@ def main():
     sp.add_argument("--name")
     sp.add_argument("--client")
     sp.set_defaults(func=cmd_learn)
+
+    sp = sub.add_parser("dash", help="live status window")
+    sp.add_argument("--every", type=float, default=6.0,
+                    help="seconds between refreshes")
+    sp.add_argument("--seconds", type=float, help="auto-close (for testing)")
+    sp.set_defaults(func=cmd_dash)
+
+    sp = sub.add_parser("doctor", help="check everything an alert depends on")
+    sp.add_argument("--fast", action="store_true",
+                    help="skip capturing frames (no anchor check)")
+    sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("pick", help="tick which clients to watch, in a window")
     sp.add_argument("--seconds", type=float,
