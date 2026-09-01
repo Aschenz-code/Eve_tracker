@@ -1282,6 +1282,82 @@ PANELS = [
 ]
 
 
+HEADER_NAMES = ["distance", "name", "type", "corporation", "alliance",
+                "velocity", "id", "group", "signal"]
+
+
+def classify_headers(found):
+    """Which kind of panel a set of column headers belongs to."""
+    if found & {"id", "group", "signal"}:
+        return "sigs"
+    if found & {"corporation", "alliance", "velocity"}:
+        return "overview"
+    if {"name", "type"} <= found:
+        return "dscan"
+    return None
+
+
+def find_panel_rects(frame):
+    """Rectangles of EVE's panels, found by their flat backgrounds.
+
+    A panel occludes the starfield, so its empty area is almost perfectly uniform
+    (std ~0.3) while open space varies with stars and nebula (std 1.5-4.7).
+    Panels sit edge to edge, so the closing kernel has to stay small - a large one
+    bridges the border between neighbours and merges them into a single blob.
+    """
+    g = to_gray(frame).astype(np.float32)
+    mean = cv2.blur(g, (9, 9))
+    sq = cv2.blur(g * g, (9, 9))
+    std = np.sqrt(np.maximum(sq - mean * mean, 0))
+    flat = ((std < 1.2) & (g < 60)).astype(np.uint8) * 255
+    flat = cv2.morphologyEx(flat, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    flat = cv2.morphologyEx(flat, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
+    _n, _lab, stats, _c = cv2.connectedComponentsWithStats(flat, 8)
+    out = []
+    for st in stats[1:]:
+        x, y, w, h, area = st[0], st[1], st[2], st[3], st[4]
+        if w >= 150 and h >= 70 and area >= 18000:
+            out.append({"x": x, "y": y, "w": w, "h": h})
+    return out
+
+
+def find_panels_anywhere(frame, words):
+    """Panels found by rectangle, then identified by the headers inside them.
+
+    Independent of the window title, which EVE lets you rename and which compact
+    layouts drop altogether.
+    """
+    found = []
+    for rect in find_panel_rects(frame):
+        # The header can sit just above the flat interior - a panel's control
+        # strip is textured, so the uniform region often starts below it.
+        top = rect["y"] - 110
+        inside = [w for w in words
+                  if rect["x"] - 8 <= w["x"] < rect["x"] + rect["w"] + 8
+                  and top <= w["y"] < rect["y"] + rect["h"]]
+        if not inside:
+            continue
+        line_h = max(6, round(statistics.median([w["h"] for w in inside])))
+        lines = {}
+        for w in sorted(inside, key=lambda w: w["y"]):
+            key = next((k for k in lines if abs(k - w["y"]) <= line_h * 0.9), w["y"])
+            lines.setdefault(key, []).append(w)
+        for y in sorted(lines):
+            names = {n for n in HEADER_NAMES
+                     if any(looks_like(w["text"], n) for w in lines[y])}
+            kind = classify_headers(names)
+            if kind and len(names) >= 2:
+                spec = next(p for p in PANELS if p["kind"] == kind)
+                xs = sorted(lines[y], key=lambda w: w["x"])
+                found.append({"spec": spec, "rect": rect, "headers": names,
+                              "title_x": rect["x"] + 2, "title_y": y,
+                              "title_h": line_h,
+                              "title_end": min(xs[-1]["x"] + xs[-1]["w"],
+                                               rect["x"] + rect["w"] - 4)})
+                break
+    return found
+
+
 def find_panels(words):
     """Locate each known panel by its title text. Returns one entry per panel."""
     found = []
@@ -1392,6 +1468,7 @@ def panel_geometry(panel, words, bounds, frame=None, threshold=110):
     for y in data_ys:
         if not merged or y - merged[-1] > 4:
             merged.append(y)
+    samples = 0
     gaps = [b - a for a, b in zip(merged, merged[1:]) if 8 <= b - a <= 60]
     pitch = round(statistics.median(gaps)) if gaps else None
     measured = pitch is not None
@@ -1433,12 +1510,21 @@ def panel_geometry(panel, words, bounds, frame=None, threshold=110):
             centres = [(a + b) / 2 for a, b in bands]
             band_gaps = [round(y - x) for x, y in zip(centres, centres[1:])
                          if 8 <= y - x <= 60]
+            samples = len(band_gaps)
             if band_gaps:
                 pitch = round(statistics.median(band_gaps))
                 # One gap is one sample: a two-row list gave 19 where the rest of
                 # the client measured 20, and being a pixel out compounds down the
                 # list. Treat it as weak so it is reported rather than trusted.
                 measured = len(band_gaps) >= 2
+
+    # Only borrow when this panel showed no spacing at all. A weak local sample
+    # still describes THIS layout; a confident value from a client using a
+    # different one (compact rows are 20px where normal are 24) does not.
+    if frame is not None and samples:
+        borrowable = False
+    else:
+        borrowable = True
 
     if pitch < head_h + 5:
         return {"error": f"row spacing came out implausibly small ({pitch}px for "
@@ -1448,7 +1534,7 @@ def panel_geometry(panel, words, bounds, frame=None, threshold=110):
     if first_row < floor_y:
         first_row = floor_y
     return {"header_y": header_y, "first_row": first_row, "pitch": pitch,
-            "text_h": text_h,
+            "text_h": text_h, "borrowable": borrowable,
             "measured_pitch": measured, "box_left": box_left,
             "box_right": min(x_hi, right_edge + 6), "key_width": key_width,
             "columns": {k: v["x"] for k, v in header.items()}}
@@ -1579,9 +1665,15 @@ def cmd_calibrate(args):
     words = ocr_words(to_image(frame), 2)
     if not words:
         sys.exit("OCR returned nothing - is the client rendering?")
-    panels = find_panels(words)
+    # Rectangle-first: a panel is a flat region that occludes the starfield, and
+    # the column headers inside say what it is. Titles are optional - EVE lets you
+    # rename windows, and a compacted layout has no title bar at all.
+    panels = find_panels_anywhere(frame, words)
     if not panels:
-        sys.exit("Found no Overview / Probe Scanner / Directional Scanner panels.")
+        panels = find_panels(words)          # fall back to titles
+    if not panels:
+        sys.exit("Found no panels. If your windows are compacted, make sure each "
+                 "list shows its column headers, or use add-panel to point at one.")
 
     # number repeats: overview, overview2, ...
     seen, proposals = {}, []
@@ -1593,10 +1685,16 @@ def cmd_calibrate(args):
 
     # a panel may only claim space up to the next panel to its right / below
     for p in proposals:
-        x_lo, x_hi, y_lo, y_hi = panel_bounds(p, proposals, fw, fh)
+        if p.get("rect"):
+            r0 = p["rect"]
+            x_lo, x_hi = r0["x"] - 8, r0["x"] + r0["w"] + 8
+            y_lo, y_hi = min(p["title_y"] - 4, r0["y"]), r0["y"] + r0["h"]
+        else:
+            x_lo, x_hi, y_lo, y_hi = panel_bounds(p, proposals, fw, fh)
         geo = panel_geometry(p, words, (x_lo, x_hi, y_lo, y_hi), frame,
                              s["threshold"])
-        if geo and "error" not in geo and not geo["measured_pitch"]:
+        if (geo and "error" not in geo and not geo["measured_pitch"]
+                and geo.get("borrowable", True)):
             borrowed = known_pitch(cfg, p["spec"]["kind"], fw, fh,
                                    geo.get("text_h"))
             if borrowed:
