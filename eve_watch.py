@@ -43,6 +43,7 @@ import ctypes
 import ctypes.wintypes as wintypes
 import datetime as dt
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -2044,9 +2045,25 @@ def cmd_pick(args):
     print("clients:", read_clients())
 
 
+def client_fingerprint(cfg, title):
+    """What a given client's watcher actually depends on.
+
+    Saving from the picker rewrites config.json whether or not anything changed,
+    so reacting to the file's timestamp bounces every watcher. Comparing this
+    instead means a client is only restarted when its own regions - or the shared
+    settings - really differ.
+    """
+    mine = sorted([r for r in cfg.get("regions", []) if r.get("window") == title],
+                  key=lambda r: r["name"])
+    blob = json.dumps({"regions": mine, "settings": cfg.get("settings", {})},
+                      sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
 def cmd_supervise(args):
     """Run one watcher per selected client, following the CLIENTS file."""
     children = {}                       # title -> Popen
+    prints = {}                         # title -> fingerprint it was started with
     cfg_stamp = os.path.getmtime(CONFIG) if os.path.exists(CONFIG) else 0
 
     def spawn(title):
@@ -2063,6 +2080,7 @@ def cmd_supervise(args):
         return subprocess.Popen(cmd, cwd=HERE, creationflags=CREATE_NO_WINDOW)
 
     def stop(title):
+        prints.pop(title, None)
         proc = children.pop(title, None)
         if proc and proc.poll() is None:
             log(f"supervisor: stopping watcher for {title!r}")
@@ -2077,9 +2095,13 @@ def cmd_supervise(args):
             now_stamp = os.path.getmtime(CONFIG) if os.path.exists(CONFIG) else 0
             if now_stamp != cfg_stamp:
                 cfg_stamp = now_stamp
-                if children:
-                    log("supervisor: config changed - restarting watchers")
-                    for title in list(children):
+                fresh = load_config()
+                changed = [t for t in list(children)
+                           if client_fingerprint(fresh, t) != prints.get(t)]
+                if changed:
+                    log(f"supervisor: config changed for {changed} - restarting "
+                        f"those only")
+                    for title in changed:
                         stop(title)
             wanted = read_clients()
             if not wanted:
@@ -2097,6 +2119,7 @@ def cmd_supervise(args):
             for title in wanted:
                 if title not in children:
                     children[title] = spawn(title)
+                    prints[title] = client_fingerprint(load_config(), title)
             if not children:
                 log("supervisor: nothing to monitor - add a client with "
                     "'eve_watch.py clients add <name>'")
