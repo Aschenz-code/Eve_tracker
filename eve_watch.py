@@ -145,9 +145,19 @@ def save_config(cfg):
     a half-written config that will not parse - which took every region with it.
     Writing to a temporary file and replacing is atomic on Windows.
     """
+    def plain(o):
+        """numpy scalars are not JSON types; write them as the numbers they are."""
+        if isinstance(o, (np.integer,)):
+            return int(o)
+        if isinstance(o, (np.floating,)):
+            return float(o)
+        if isinstance(o, (np.bool_,)):
+            return bool(o)
+        raise TypeError(f"cannot serialise {type(o).__name__}")
+
     tmp = CONFIG + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, indent=2)
+        json.dump(cfg, fh, indent=2, default=plain)
         fh.flush()
         os.fsync(fh.fileno())
     if os.path.exists(CONFIG):
@@ -1345,7 +1355,9 @@ def find_panel_rects(frame):
     for st in stats[1:]:
         x, y, w, h, area = st[0], st[1], st[2], st[3], st[4]
         if w >= 150 and h >= 70 and area >= 18000:
-            out.append({"x": x, "y": y, "w": w, "h": h})
+            # OpenCV hands back numpy int32; these end up in the saved config,
+            # where json refuses them and the write dies half-finished.
+            out.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h)})
     return out
 
 
@@ -2919,14 +2931,28 @@ def cmd_pick(args):
 
         def apply_now():
             win.destroy()
-            ok2, _text2 = with_progress(
+            ok2, text2 = with_progress(
                 root, f"Writing regions for {short_client(title)}...",
                 lambda: _calibrate_report(title, apply=True))
             rebuild()
             state["status"].config(
                 text=("Calibrated " + short_client(title)) if ok2
-                     else ("Calibration failed - see console"),
+                     else "Calibration failed - details below",
                 fg="#060" if ok2 else "#b00")
+            if not ok2:
+                # There is no console under pythonw, so show it here instead of
+                # telling someone to go and look at output that was discarded.
+                err = tk.Toplevel(root)
+                err.title("calibration failed")
+                err.attributes("-topmost", True)
+                err.configure(padx=12, pady=10)
+                box2 = scrolledtext.ScrolledText(err, width=94, height=22,
+                                                 font=("Consolas", 9))
+                box2.pack()
+                box2.insert("1.0", text2 or "(no output)")
+                box2.configure(state="disabled")
+                tk.Button(err, text="Close", width=12,
+                          command=err.destroy).pack(anchor="w", pady=(8, 0))
 
         bar = tk.Frame(win)
         bar.pack(pady=(8, 0), anchor="w")
