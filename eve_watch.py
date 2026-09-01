@@ -1815,80 +1815,160 @@ def cmd_clone(args):
           "somewhere else on this character and needs its own select.")
 
 
+def _calibrate_report(client, apply=False):
+    """Run calibrate for one client and capture what it printed."""
+    import contextlib, io
+    buf = io.StringIO()
+    ns = argparse.Namespace(client=client, yes=apply)
+    try:
+        with contextlib.redirect_stdout(buf):
+            cmd_calibrate(ns)
+        return True, buf.getvalue()
+    except SystemExit as exc:
+        return False, buf.getvalue() + "\n" + str(exc)
+    except Exception as exc:
+        return False, buf.getvalue() + f"\nfailed: {exc}"
+
+
 def cmd_pick(args):
-    """Tick which clients to watch. Writes CLIENTS; a running supervisor follows."""
+    """Choose clients and regions in a window.
+
+    A client with no regions cannot be ticked - a watcher pointed at an
+    unconfigured client starts happily and watches nothing, which is the
+    failure mode hardest to notice. Calibrate it from here instead.
+    """
     import tkinter as tk
-
-    cfg = load_config()
-    configured = {}
-    for r in cfg.get("regions", []):
-        configured.setdefault(r.get("window"), []).append(r["name"])
-    live = list_windows("EVE - ")
-    watching = set(read_clients())
-    running_pids = set(_watcher_pids())
-
-    # every client we know about: running now, or configured earlier
-    titles = sorted({h["title"] for h in live} | set(configured) | watching)
-    if not titles:
-        sys.exit("No EVE clients running and none configured.")
-    live_titles = {h["title"] for h in live}
+    from tkinter import scrolledtext
 
     root = tk.Tk()
     root.title("eve-watch - clients")
     root.attributes("-topmost", True)
     root.configure(padx=16, pady=12)
+    body = tk.Frame(root)
+    body.pack(fill="both", expand=True)
+    state = {"status": None}
 
-    tk.Label(root, text="Tick the clients you want watched",
-             font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=3,
-                                                 sticky="w", pady=(0, 2))
-    tk.Label(root, text=f"{len(running_pids)} watcher(s) running now",
-             font=("Segoe UI", 9), fg="#666").grid(row=1, column=0, columnspan=3,
-                                                   sticky="w", pady=(0, 10))
+    def calibrate_dialog(title):
+        ok, text = _calibrate_report(title, apply=False)
+        win = tk.Toplevel(root)
+        win.title(f"calibrate - {short_client(title)}")
+        win.attributes("-topmost", True)
+        win.configure(padx=12, pady=10)
+        box = scrolledtext.ScrolledText(win, width=96, height=24,
+                                        font=("Consolas", 9))
+        box.pack()
+        box.insert("1.0", text or "(no output)")
+        box.configure(state="disabled")
 
-    vars_ = {}
-    for i, title in enumerate(titles):
-        v = tk.IntVar(value=1 if title in watching else 0)
-        vars_[title] = v
-        name = short_client(title)
-        regions = configured.get(title, [])
-        tk.Checkbutton(root, variable=v, text=name,
-                       font=("Segoe UI", 11)).grid(row=2 + i, column=0, sticky="w")
-        if regions:
-            detail, colour = ", ".join(sorted(regions)), "#333"
-        else:
-            detail, colour = "no regions - run calibrate first", "#b00"
-        tk.Label(root, text=detail, font=("Segoe UI", 9), fg=colour
-                 ).grid(row=2 + i, column=1, sticky="w", padx=(14, 14))
-        tk.Label(root, text="" if title in live_titles else "not running",
-                 font=("Segoe UI", 9), fg="#888").grid(row=2 + i, column=2, sticky="w")
+        def apply_now():
+            ok2, text2 = _calibrate_report(title, apply=True)
+            win.destroy()
+            rebuild()
+            state["status"].config(
+                text=("Calibrated " + short_client(title)) if ok2
+                     else ("Calibration failed - see console"),
+                fg="#060" if ok2 else "#b00")
 
-    status = tk.Label(root, text="", font=("Segoe UI", 9), fg="#060")
-    status.grid(row=2 + len(titles), column=0, columnspan=3, sticky="w", pady=(10, 4))
+        bar = tk.Frame(win)
+        bar.pack(pady=(8, 0), anchor="w")
+        tk.Button(bar, text="Apply", width=12,
+                  state=("normal" if ok else "disabled"),
+                  command=apply_now).pack(side="left")
+        tk.Button(bar, text="Cancel", width=12,
+                  command=win.destroy).pack(side="left", padx=8)
+
+    def rebuild():
+        for w in body.winfo_children():
+            w.destroy()
+        cfg = load_config()
+        by_client = {}
+        for r in cfg.get("regions", []):
+            by_client.setdefault(r.get("window"), []).append(r)
+        live = {h["title"] for h in list_windows("EVE - ")}
+        watching = set(read_clients())
+        titles = sorted(live | set(by_client) | watching)
+
+        tk.Label(body, text="Clients to watch", font=("Segoe UI", 12, "bold")
+                 ).grid(row=0, column=0, columnspan=4, sticky="w")
+        tk.Label(body, text=f"{len(_watcher_pids())} watcher(s) running",
+                 font=("Segoe UI", 9), fg="#666"
+                 ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        client_vars, region_vars = {}, {}
+        row = 2
+        for title in titles:
+            regions = sorted(by_client.get(title, []), key=lambda r: r["name"])
+            calibrated = bool(regions)
+            cv = tk.IntVar(value=1 if title in watching and calibrated else 0)
+            client_vars[title] = cv
+            cb = tk.Checkbutton(body, variable=cv, text=short_client(title),
+                                font=("Segoe UI", 11, "bold"))
+            if not calibrated:
+                cb.configure(state="disabled")
+            cb.grid(row=row, column=0, sticky="w")
+            note = "" if title in live else "not running"
+            tk.Label(body, text=note, font=("Segoe UI", 9), fg="#888"
+                     ).grid(row=row, column=1, sticky="w", padx=(8, 8))
+            if not calibrated:
+                tk.Label(body, text="must be calibrated first",
+                         font=("Segoe UI", 9), fg="#b00"
+                         ).grid(row=row, column=2, sticky="w")
+            tk.Button(body, text=("Re-calibrate" if calibrated else "Calibrate"),
+                      width=13,
+                      state=("normal" if title in live else "disabled"),
+                      command=lambda t=title: calibrate_dialog(t)
+                      ).grid(row=row, column=3, sticky="w", padx=(10, 0))
+            row += 1
+            for r in regions:
+                rv = tk.IntVar(value=1 if r.get("enabled", True) else 0)
+                region_vars[(title, r["name"])] = rv
+                label = f"{r['name']}   ({r.get('mode', 'change')})"
+                tk.Checkbutton(body, variable=rv, text=label,
+                               font=("Segoe UI", 9)
+                               ).grid(row=row, column=0, columnspan=3,
+                                      sticky="w", padx=(28, 0))
+                row += 1
+            row += 1
+
+        state["client_vars"], state["region_vars"] = client_vars, region_vars
+        state["status"] = tk.Label(body, text="", font=("Segoe UI", 9), fg="#060")
+        state["status"].grid(row=row, column=0, columnspan=4, sticky="w",
+                             pady=(6, 4))
+        bar = tk.Frame(body)
+        bar.grid(row=row + 1, column=0, columnspan=4, sticky="w")
+        tk.Button(bar, text="Save", width=12, command=save).pack(side="left")
+        tk.Button(bar, text="Close", width=12,
+                  command=root.destroy).pack(side="left", padx=8)
 
     def save():
-        chosen = [t for t, v in vars_.items() if v.get()]
+        cfg = load_config()
+        chosen = [t for t, v in state["client_vars"].items() if v.get()]
         write_clients(chosen)
-        unconfigured = [short_client(t) for t in chosen if not configured.get(t)]
-        msg = f"Saved {len(chosen)} client(s). A running supervisor picks this up in a few seconds."
-        if unconfigured:
-            msg += f"  Note: {', '.join(unconfigured)} have no regions yet."
-        status.config(text=msg, fg="#b00" if unconfigured else "#060")
+        off = 0
+        for r in cfg.get("regions", []):
+            key = (r.get("window"), r["name"])
+            if key in state["region_vars"]:
+                on = bool(state["region_vars"][key].get())
+                r["enabled"] = on
+                off += 0 if on else 1
+        save_config(cfg)
+        msg = (f"Saved: {len(chosen)} client(s)"
+               + (f", {off} region(s) switched off" if off else "")
+               + ". Watchers restart within a few seconds.")
+        state["status"].config(text=msg, fg="#060")
         print(msg)
 
-    btns = tk.Frame(root)
-    btns.grid(row=3 + len(titles), column=0, columnspan=3, sticky="w")
-    tk.Button(btns, text="Save", width=12, command=save).pack(side="left")
-    tk.Button(btns, text="Close", width=12, command=root.destroy).pack(side="left",
-                                                                      padx=8)
+    rebuild()
     if args.seconds:
         root.after(int(args.seconds * 1000), root.destroy)
     root.mainloop()
-    print("current selection:", read_clients())
+    print("clients:", read_clients())
 
 
 def cmd_supervise(args):
     """Run one watcher per selected client, following the CLIENTS file."""
     children = {}                       # title -> Popen
+    cfg_stamp = os.path.getmtime(CONFIG) if os.path.exists(CONFIG) else 0
 
     def spawn(title):
         cmd = [sys.executable, os.path.abspath(__file__), "watch",
@@ -1915,6 +1995,13 @@ def cmd_supervise(args):
 
     try:
         while True:
+            now_stamp = os.path.getmtime(CONFIG) if os.path.exists(CONFIG) else 0
+            if now_stamp != cfg_stamp:
+                cfg_stamp = now_stamp
+                if children:
+                    log("supervisor: config changed - restarting watchers")
+                    for title in list(children):
+                        stop(title)
             wanted = read_clients()
             if not wanted:
                 wanted = configured_clients(load_config())
@@ -2082,7 +2169,8 @@ def cmd_watch(args):
     regions = pick_regions(cfg, args.name)
     win = resolve_window(args.client or regions[0]["window"])
     # With several clients configured, only watch the ones belonging to this window.
-    mine = regions_for(regions, win["title"])
+    mine = [r for r in regions_for(regions, win["title"])
+            if r.get("enabled", True)]
     if not mine:
         sys.exit(f"No regions configured for {win['title']!r}. "
                  f"Configured clients: {sorted({r.get('window','?') for r in cfg['regions']})}")
