@@ -1295,6 +1295,32 @@ def find_panels(words):
     return found
 
 
+def text_bands(frame, left, width, top, height, threshold):
+    """Vertical runs of text in a list area, as (start_row, end_row).
+
+    Row spacing measured from OCR word positions is unreliable: words within one
+    rendered row sit at slightly different heights, so a single row can look like
+    two lines six pixels apart and the derived pitch comes out short. The lit
+    pixels themselves have no such jitter.
+    """
+    if width < 4 or height < 4:
+        return []
+    mask = text_mask(crop(frame, {"left": left, "top": top,
+                                  "width": width, "height": height}), threshold)
+    profile = mask.sum(axis=1) > 2
+    out, start = [], None
+    for i, on in enumerate(profile):
+        if on and start is None:
+            start = i
+        elif not on and start is not None:
+            if i - start >= 3:
+                out.append((top + start, top + i))
+            start = None
+    if start is not None and len(profile) - start >= 3:
+        out.append((top + start, top + len(profile)))
+    return out
+
+
 def panel_bounds(panel, panels, frame_w, frame_h):
     """The screen area this panel owns, stopping at its neighbours.
 
@@ -1316,7 +1342,7 @@ def panel_bounds(panel, panels, frame_w, frame_h):
     return x_lo, x_hi, y_lo, y_hi
 
 
-def panel_geometry(panel, words, bounds):
+def panel_geometry(panel, words, bounds, frame=None, threshold=110):
     """Work out the header row, columns and row pitch of one panel."""
     spec = panel["spec"]
     x_lo, x_hi, y_lo, y_hi = bounds
@@ -1385,6 +1411,20 @@ def panel_geometry(panel, words, bounds):
         key_width = None
 
     text_h = round(statistics.median([w["h"] for w in header.values()]))
+    # Prefer pixel-measured spacing; OCR word jitter makes the gaps unreliable.
+    if frame is not None:
+        bands = text_bands(frame, box_left, max(4, right_edge - box_left),
+                           floor_y, min(320, max(8, y_hi - floor_y)), threshold)
+        if bands:
+            first_row = bands[0][0]
+        if len(bands) >= 2:
+            centres = [(a + b) / 2 for a, b in bands]
+            band_gaps = [round(y - x) for x, y in zip(centres, centres[1:])
+                         if 8 <= y - x <= 60]
+            if band_gaps:
+                pitch = round(statistics.median(band_gaps))
+                measured = True
+
     if pitch < head_h + 5:
         return {"error": f"row spacing came out implausibly small ({pitch}px for "
                          f"{head_h}px text) - the header and first row were "
@@ -1460,7 +1500,8 @@ def cmd_calibrate(args):
     # a panel may only claim space up to the next panel to its right / below
     for p in proposals:
         x_lo, x_hi, y_lo, y_hi = panel_bounds(p, proposals, fw, fh)
-        geo = panel_geometry(p, words, (x_lo, x_hi, y_lo, y_hi))
+        geo = panel_geometry(p, words, (x_lo, x_hi, y_lo, y_hi), frame,
+                             s["threshold"])
         if geo and "error" not in geo and not geo["measured_pitch"]:
             borrowed = known_pitch(cfg, p["spec"]["kind"], fw, fh,
                                    geo.get("text_h"))
