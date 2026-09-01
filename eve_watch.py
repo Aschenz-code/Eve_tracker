@@ -1892,9 +1892,14 @@ def collect_health(capture=True):
     add(bool(supervisors), "supervisor running",
         f"pid {supervisors}" if supervisors else "not running",
         "press Save in pick.bat, or run: eve_watch.py supervise")
-    add(len(watchers) >= len(selected) and bool(selected), "a watcher per client",
+    add(len(supervisors) <= 1, "exactly one supervisor",
+        f"{len(supervisors)} running" if len(supervisors) != 1 else "yes",
+        "each supervisor starts its own watchers - every alert would repeat. "
+        "Stop the extras.")
+    add(len(watchers) == len(selected) and bool(selected), "a watcher per client",
         f"{len(watchers)} running for {len(selected)} selected",
-        "the supervisor starts these; check it is running")
+        "too few: check the supervisor. too many: duplicate supervisors, "
+        "alerts will repeat")
     add(not os.path.exists(PAUSEFILE), "not paused",
         "PAUSED file present" if os.path.exists(PAUSEFILE) else "running",
         "run resume.bat")
@@ -2534,6 +2539,13 @@ def client_fingerprint(cfg, title):
 
 def cmd_supervise(args):
     """Run one watcher per selected client, following the CLIENTS file."""
+    others = [p for p in _supervisor_pids() if p != os.getpid()]
+    if others and not args.force:
+        sys.exit(f"A supervisor is already running (pid {others}). Each one starts "
+                 f"its own watcher per client, so a second copy means every alert "
+                 f"fires twice.\nStop the other first, or pass --force if you "
+                 f"are certain.")
+
     children = {}                       # title -> Popen
     prints = {}                         # title -> fingerprint it was started with
     cfg_stamp = os.path.getmtime(CONFIG) if os.path.exists(CONFIG) else 0
@@ -3360,6 +3372,8 @@ def main():
 
     sp = sub.add_parser("supervise", help="run a watcher per selected client")
     sp.add_argument("--poll", type=float, default=5.0)
+    sp.add_argument("--force", action="store_true",
+                    help="start even if another supervisor is running")
     sp.add_argument("--mode", choices=sorted(PROFILES))
     sp.add_argument("--interval", type=float)
     sp.add_argument("--sensitivity", type=int)
