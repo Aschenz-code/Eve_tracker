@@ -2210,8 +2210,9 @@ def collect_health(capture=True):
         "Stop the extras.")
     add(len(watchers) == len(selected) and bool(selected), "a watcher per client",
         f"{len(watchers)} running for {len(selected)} selected",
-        "too few: check the supervisor. too many: duplicate supervisors, "
-        "alerts will repeat")
+        "too few: check the supervisor. too many: orphans from a supervisor "
+        "that died, or a second supervisor - alerts will repeat. Restarting "
+        "the supervisor clears orphans.")
     add(not os.path.exists(PAUSEFILE), "not paused",
         "PAUSED file present" if os.path.exists(PAUSEFILE) else "running",
         "run resume.bat")
@@ -3098,6 +3099,27 @@ def cmd_supervise(args):
                  f"its own watcher per client, so a second copy means every alert "
                  f"fires twice.\nStop the other first, or pass --force if you "
                  f"are certain.")
+
+    # A supervisor that dies leaves its watchers running - they are separate
+    # processes and nothing reaps them. The next supervisor then starts a second
+    # set alongside and every alert fires twice. Clear the strays before adding
+    # ours; the guard above means no live supervisor owns them.
+    strays = [p for p in _watcher_pids()]
+    if strays:
+        log(f"supervisor: clearing {len(strays)} orphaned watcher(s) left by a "
+            f"previous run: {strays}")
+        for pid in strays:
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"],
+                               capture_output=True, timeout=20,
+                               creationflags=CREATE_NO_WINDOW)
+            except Exception as exc:
+                log(f"supervisor: could not stop stray {pid}: {exc}")
+        time.sleep(1.5)
+        left = _watcher_pids()
+        if left:
+            log(f"!! supervisor: {len(left)} stray watcher(s) survived: {left}. "
+                f"Alerts may repeat - stop them by hand.")
 
     children = {}                       # title -> Popen
     prints = {}                         # title -> fingerprint it was started with
