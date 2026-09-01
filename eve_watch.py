@@ -308,6 +308,18 @@ def ncc(a, b):
                                    cv2.TM_CCOEFF_NORMED)[0][0])
 
 
+def despeckle(gray):
+    """Drop isolated bright pixels, keep glyph strokes.
+
+    EVE's panels are semi-transparent, so the starfield behind them shows through
+    the list. Stars are as bright as text, so clipping cannot remove them, and as
+    the camera drifts they come and go - one unchanged row measured 793 lit pixels
+    in one frame and 586 in the next, dropping its self-match to 0.92 and making
+    it look like a different ship. Stars are isolated dots; text is connected.
+    """
+    return cv2.medianBlur(np.ascontiguousarray(gray, dtype=np.uint8), 3)
+
+
 def find_best(search, template):
     """Best correlation of `template` anywhere inside `search`.
 
@@ -718,8 +730,8 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
         # Clipping to the text leaves only glyph pixels: the same row scores
         # 1.0000, a different one 0.35.
         clip = st["pix_clip"]
-        occupied.append((apply_clip(to_gray(crop(frame, wide)), clip),
-                         apply_clip(to_gray(patch), clip), cell))
+        occupied.append((despeckle(apply_clip(to_gray(crop(frame, wide)), clip)),
+                         despeckle(apply_clip(to_gray(patch), clip)), cell))
 
     used, fresh = set(), []
     for search, exact, cell in occupied:
@@ -3058,7 +3070,7 @@ def cmd_watch(args):
               "pitch": r.get("row_pitch", 20),
               "row_h": r.get("row_height", r.get("row_pitch", 20) - 2),
               "key_width": r.get("key_width"),
-              "pix_ncc": r.get("pix_ncc", 0.95),
+              "pix_ncc": r.get("pix_ncc", 0.90),
               "pix_min_lit": r.get("pix_min_lit", 20),
               "row_offset": r.get("row_offset", 0),
               "pix_pad": r.get("pix_pad", 3),
