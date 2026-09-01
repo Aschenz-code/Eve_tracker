@@ -17,11 +17,13 @@ Windows only. Python 3.12+.
 1. Start the clients you want watched. They must be running and **not minimised** —
    a minimised window stops rendering and there is nothing to read. They may sit
    behind another game or on a second monitor.
-2. Double-click **pick.bat**.
-3. Press **Calibrate** next to each client. It finds that client's Overview,
+2. Double-click **eve-watch.bat**. That is the hub — every window below opens
+   from it, so you never need the other launchers directly.
+3. Press **Clients / calibrate**.
+4. Press **Calibrate** next to each client. It finds that client's Overview,
    Probe Scanner and Directional Scanner panels, shows you what it found, and
    writes the regions when you press Apply.
-4. Tick the clients (and any individual regions) you want, then **Save**.
+5. Tick the clients (and any individual regions) you want, then **Save**.
 
 That's it — Save starts the watchers. A client cannot be ticked until it has been
 calibrated, and once calibrated it stays that way.
@@ -35,10 +37,13 @@ stops drawing column headers when there are no results — run a scan first.
 
 | do this | with |
 |---|---|
+| open everything from one window | **eve-watch.bat** (the hub) |
 | add / remove clients or regions | **pick.bat** |
+| watch events as they happen | **events.bat** |
+| check every part of the setup | **Check everything** in the hub, or **doctor.bat** |
 | stop alerting, keep watching | **pause.bat** / **resume.bat** (all clients) |
 | change how loudly it alerts | **mode-active.bat** / **mode-away.bat** / **mode-silent.bat** |
-| check it is alive | **status.bat** |
+| check it is alive | **Status** in the hub (live) or **status.bat** (one-shot text) |
 | start watching after a reboot | **watch.bat** (single client) or `eve_watch.py supervise` |
 
 Alert profiles:
@@ -81,6 +86,10 @@ To get the timecode **inside your OBS recording** on every event, set `obs_dir` 
 `config.json` to your OBS output folder.
 
 ## If something looks wrong
+
+Start with **Check everything** in the hub (or **doctor.bat**). It tests the whole
+setup — regions, watchers, mode, OCR, whether the log is still moving — and says
+what to do about anything that fails. Then, to see what one client is reading:
 
     eve_watch.py shot --client "Name"      # does every region still lock?
 
