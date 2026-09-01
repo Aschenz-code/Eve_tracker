@@ -1365,23 +1365,37 @@ def panel_geometry(panel, words, bounds):
     if key_width is not None and key_width < 20:
         key_width = None
 
+    text_h = round(statistics.median([w["h"] for w in header.values()]))
     return {"header_y": header_y, "first_row": first_row, "pitch": pitch,
+            "text_h": text_h,
             "measured_pitch": measured, "box_left": box_left,
             "box_right": min(x_hi, right_edge + 6), "key_width": key_width,
             "columns": {k: v["x"] for k, v in header.items()}}
 
 
-def known_pitch(cfg, kind, win_w, win_h):
+def known_pitch(cfg, kind, win_w, win_h, text_h=None):
     """A row pitch already measured for this kind of panel at this window size.
 
     A list with fewer than two rows cannot reveal its own spacing, but the same
     panel on another client at the same UI scale can - and that is exact, where
     guessing from the header gap is a pixel or two out and drifts down the list.
     """
-    for r in cfg.get("regions", []):
-        if (r.get("row_pitch") and r.get("win_width") == win_w
-                and r.get("win_height") == win_h
-                and re.sub(r"\d+$", "", r["name"]) == kind):
+    candidates = [r for r in cfg.get("regions", [])
+                  if r.get("row_pitch") and r.get("win_width") == win_w
+                  and r.get("win_height") == win_h
+                  and re.sub(r"\d+$", "", r["name"]) == kind]
+    # Window size does not change when EVE's UI scale does, so matching on it
+    # alone would happily borrow a pitch from a client still configured at the
+    # old scale. Glyph height tracks the scale: prefer a donor that agrees, and
+    # only fall back to one of unknown scale when there is no better option.
+    if text_h:
+        for r in candidates:
+            if r.get("text_h") and abs(r["text_h"] - text_h) <= 1:
+                return r["row_pitch"]
+        if any(r.get("text_h") for r in candidates):
+            return None                 # a known-scale donor exists and disagrees
+    for r in candidates:
+        if not r.get("text_h"):
             return r["row_pitch"]
     return None
 
@@ -1422,7 +1436,8 @@ def cmd_calibrate(args):
         x_lo, x_hi, y_lo, y_hi = panel_bounds(p, proposals, fw, fh)
         geo = panel_geometry(p, words, (x_lo, x_hi, y_lo, y_hi))
         if geo and "error" not in geo and not geo["measured_pitch"]:
-            borrowed = known_pitch(cfg, p["spec"]["kind"], fw, fh)
+            borrowed = known_pitch(cfg, p["spec"]["kind"], fw, fh,
+                                   geo.get("text_h"))
             if borrowed:
                 geo["pitch"] = borrowed
                 geo["borrowed_pitch"] = True
@@ -1460,6 +1475,7 @@ def cmd_calibrate(args):
             "zoom": True, "alert": spec["mode"] != "dscan",
             "say": spec["say"].format(label=p["label"]),
         }
+        region["text_h"] = geo.get("text_h")
         if spec["mode"] == "roster":
             region.update(identity="pixels", row_pitch=geo["pitch"],
                           row_height=max(8, geo["pitch"] - 2), row_offset=8,
