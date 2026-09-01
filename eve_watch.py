@@ -1478,6 +1478,85 @@ def known_pitch(cfg, kind, win_w, win_h, text_h=None):
     return None
 
 
+def cmd_add_panel(args):
+    """Calibrate one panel the user points at, whatever its title says.
+
+    Automatic discovery keys on the panel title, which EVE lets you rename, and
+    on column headers, which are ambiguous between adjacent panels. When it
+    cannot find a panel, dragging a box around it is unambiguous - everything
+    inside (columns, row spacing, anchor) is then derived exactly as usual.
+    """
+    win = resolve_window(args.client)
+    frame = one_frame(win["hwnd"], 0.5)
+    cfg = load_config()
+    s = cfg["settings"]
+
+    spec = next((p for p in PANELS if p["kind"] == args.kind), None)
+    if spec is None:
+        sys.exit(f"Unknown panel kind {args.kind!r}")
+
+    picked = drag_box(to_image(frame),
+                      f"Drag a box around the whole {args.kind} panel - include its "
+                      f"column headers and the rows below them.")
+    if not picked:
+        sys.exit("Cancelled.")
+    px, py, pw, ph = picked
+    bounds = (px, px + pw, py, py + ph)
+
+    fake = {"spec": spec, "title_x": px, "title_y": py, "title_h": 12,
+            "title_end": px + 60}
+    words = ocr_words(to_image(crop(frame, {"left": px, "top": py,
+                                            "width": pw, "height": ph})), 2, (px, py))
+    if not words:
+        sys.exit("No text found in that box - is the panel visible?")
+    geo = panel_geometry(fake, words, bounds, frame, s["threshold"])
+    if geo is None or "error" in geo:
+        sys.exit(f"Could not read it: {(geo or {}).get('error', 'no column headers')}")
+    geo["box_right"] = min(geo["box_right"], px + pw)
+    geo["box_bottom"] = min(py + ph, geo["first_row"] + 520)
+
+    name = args.name or args.kind
+    top = geo["first_row"] - 8
+    anchor = {"left": px + 2, "top": geo["header_y"] - 4,
+              "width": min(140, pw - 4), "height": (geo.get("text_h") or 11) + 8}
+    region = {
+        "name": name, "window": win["title"], "mode": spec["mode"],
+        "win_width": frame.shape[1], "win_height": frame.shape[0],
+        "target": {"left": geo["box_left"], "top": top,
+                   "width": max(60, geo["box_right"] - geo["box_left"]),
+                   "height": max(2 * geo["pitch"], geo["box_bottom"] - top)},
+        "anchor": anchor, "key_width": geo["key_width"], "max_drift": 200,
+        "ignore": list(spec["ignore"]), "zoom": True,
+        "alert": spec["mode"] != "dscan", "text_h": geo.get("text_h"),
+        "say": spec["say"].format(label=name),
+    }
+    if spec["mode"] == "roster":
+        region.update(identity="pixels", row_pitch=geo["pitch"],
+                      row_height=max(8, geo["pitch"] - 2), row_offset=8,
+                      pix_ncc=0.90, pix_min_lit=20)
+
+    print(f"\n{name}: box {region['target']['width']}x{region['target']['height']} "
+          f"at ({region['target']['left']},{top})  pitch {geo['pitch']}"
+          f"{'' if geo['measured_pitch'] else ' (GUESSED)'}  "
+          f"key_width {geo['key_width']}")
+    rows = ocr_rows(to_image(crop(frame, region["target"])), s["ocr_scale"],
+                    region.get("key_width"))
+    print("reads:")
+    for t in [r["text"] for r in rows[:6]] or ["(empty)"]:
+        print(f"     {t}")
+    if not args.yes:
+        print("\nRe-run with --yes to save it.")
+        return
+    Image.fromarray(to_gray(crop(frame, anchor))).save(
+        os.path.join(HERE, f"anchor_{slug(win['title'])}_{name}.png"))
+    cfg["regions"] = [r for r in cfg["regions"]
+                      if not (r.get("window") == win["title"] and r["name"] == name)]
+    cfg["regions"].append(region)
+    save_config(cfg)
+    print(f"\nSaved {name!r}. Check it with:  eve_watch.py shot --client "
+          f"{short_client(win['title'])!r}")
+
+
 def cmd_calibrate(args):
     """Build this client's regions by reading its panels off the screen.
 
@@ -1922,6 +2001,20 @@ def cmd_clone(args):
     print(f"    eve_watch.py shot --client {short_client(dst_window)!r}")
     print("Every anchor must report a match; if one is LOST that panel sits "
           "somewhere else on this character and needs its own select.")
+
+
+def _capture_output(fn, ns):
+    """Run a command, capture what it printed, and say whether it succeeded."""
+    import contextlib, io
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            fn(ns)
+        return True, buf.getvalue()
+    except SystemExit as exc:
+        return False, buf.getvalue() + f"\n{exc}"
+    except Exception as exc:
+        return False, buf.getvalue() + f"\nfailed: {exc}"
 
 
 def _calibrate_report(client, apply=False):
@@ -2630,6 +2723,57 @@ def cmd_pick(args):
     body.pack(fill="both", expand=True)
     state = {"status": None}
 
+    def add_panel_dialog(title):
+        """For a panel automatic discovery cannot find - a renamed one, say."""
+        win = tk.Toplevel(root)
+        win.title(f"add a panel - {short_client(title)}")
+        win.attributes("-topmost", True)
+        win.configure(padx=14, pady=12)
+        tk.Label(win, text="Which kind of panel do you want to add?",
+                 font=("Segoe UI", 10)).pack(anchor="w")
+        tk.Label(win, text="You will then drag a box around it, headers included.",
+                 font=("Segoe UI", 9), fg="#666").pack(anchor="w", pady=(0, 10))
+        namevar = tk.StringVar()
+        row = tk.Frame(win); row.pack(anchor="w", pady=(0, 10))
+        tk.Label(row, text="name (optional):", font=("Segoe UI", 9)).pack(side="left")
+        tk.Entry(row, textvariable=namevar, width=18).pack(side="left", padx=6)
+
+        def go(kind):
+            win.destroy()
+            ns = argparse.Namespace(kind=kind, client=title,
+                                    name=namevar.get().strip() or None, yes=False)
+            ok, text = with_progress(root, f"Reading that panel...",
+                                     lambda: _capture_output(cmd_add_panel, ns))
+            show = tk.Toplevel(root)
+            show.title("add panel")
+            show.attributes("-topmost", True)
+            show.configure(padx=12, pady=10)
+            box = scrolledtext.ScrolledText(show, width=88, height=16,
+                                            font=("Consolas", 9))
+            box.pack()
+            box.insert("1.0", text or "(no output)")
+            box.configure(state="disabled")
+
+            def apply_now():
+                show.destroy()
+                ns2 = argparse.Namespace(kind=kind, client=title,
+                                         name=namevar.get().strip() or None, yes=True)
+                with_progress(root, "Saving...",
+                              lambda: _capture_output(cmd_add_panel, ns2))
+                rebuild()
+
+            bar = tk.Frame(show); bar.pack(anchor="w", pady=(8, 0))
+            tk.Button(bar, text="Apply", width=12,
+                      state=("normal" if ok else "disabled"),
+                      command=apply_now).pack(side="left")
+            tk.Button(bar, text="Cancel", width=12,
+                      command=show.destroy).pack(side="left", padx=8)
+
+        btns = tk.Frame(win); btns.pack(anchor="w")
+        for kind in [p["kind"] for p in PANELS]:
+            tk.Button(btns, text=kind, width=12,
+                      command=lambda k=kind: go(k)).pack(side="left", padx=3)
+
     def calibrate_dialog(title):
         ok, text = with_progress(
             root, f"Reading the panels on {short_client(title)}...",
@@ -2704,6 +2848,10 @@ def cmd_pick(args):
                       state=("normal" if title in live else "disabled"),
                       command=lambda t=title: calibrate_dialog(t)
                       ).grid(row=row, column=3, sticky="w", padx=(10, 0))
+            tk.Button(body, text="Add panel...", width=12,
+                      state=("normal" if title in live else "disabled"),
+                      command=lambda t=title: add_panel_dialog(t)
+                      ).grid(row=row, column=4, sticky="w", padx=(4, 0))
             row += 1
             for r in regions:
                 rv = tk.IntVar(value=1 if r.get("enabled", True) else 0)
@@ -3537,6 +3685,14 @@ def main():
     sp = sub.add_parser("windows", help="list candidate windows")
     sp.add_argument("--filter", default="EVE - ")
     sp.set_defaults(func=cmd_windows)
+
+    sp = sub.add_parser("add-panel",
+                        help="point at a panel and calibrate it, whatever its title")
+    sp.add_argument("kind", choices=[p["kind"] for p in PANELS])
+    sp.add_argument("--client")
+    sp.add_argument("--name", help="region name (defaults to the kind)")
+    sp.add_argument("--yes", action="store_true")
+    sp.set_defaults(func=cmd_add_panel)
 
     sp = sub.add_parser("calibrate",
                         help="find this client's panels and build its regions")
