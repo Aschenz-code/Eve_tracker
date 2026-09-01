@@ -75,6 +75,33 @@ contact in the overview. \<pilot\> \<ship\>"* — so you know which window to op
 
 `clients add` takes effect within seconds; no restart when you log a character in.
 
+## More than one overview window
+
+Regions are independent, so watch as many as you like — give each its own name:
+
+    eve_watch.py select --mode roster --name overview  --client "Name"
+    eve_watch.py select --mode roster --name overview2 --client "Name"
+
+One catch worth knowing. Every overview panel's title begins `Overview (`, so
+their anchors are **identical templates**. If a region ever fails its local
+search it falls back to scanning the whole window, and with two panels open it
+can lock onto the wrong one and report the wrong list — silently, because both
+matches score about 1.000.
+
+`max_drift` prevents that: it is the furthest, in pixels, an anchor may be found
+from where it was set up.
+
+    "max_drift": 200
+
+Set it on every docked panel; 200 is a good default, and it should be comfortably
+smaller than the distance between two panels that look alike. Leave it off for a
+region anchored to a bracket floating in space, which legitimately moves anywhere
+on screen.
+
+If a panel really does move further than `max_drift`, the region reports itself
+lost and says so out loud — the safe failure, rather than quietly watching the
+wrong window.
+
 ## Reading a value, not just "it changed"
 
 `change` mode detects that pixels moved, not what they say. To have it report an

@@ -96,6 +96,7 @@ DEFAULTS = {
     "ncc_min": 0.99,         # correlation below this counts as changed (match=ncc)
     "clip": 0,               # zero every pixel below this before correlating
     "reconnect_after": 30,   # seconds without frames before hunting a new window
+    "max_drift": None,       # px an anchor may be found from where it was set up
     "voice_name": None,      # substring of a TTS voice name, e.g. "Mark"
     "clipboard_sigs": True,  # parse EVE probe-scanner pastes for exact signature data
 }
@@ -853,8 +854,11 @@ class Tracker:
         self.lost = False
         self.drift = (0, 0)
 
+        self.origin = None
+        self.max_drift = region.get("max_drift", settings.get("max_drift"))
         anchor = region.get("anchor")
         if anchor and os.path.exists(anchor_path(self.name, region.get("window"))):
+            self.origin = (anchor["left"], anchor["top"])
             self.tmpl = np.array(Image.open(anchor_path(self.name, region.get("window"))).convert("L"))
             self.anchor_pos = [anchor["left"], anchor["top"]]
             self.offset = (self.target["left"] - anchor["left"],
@@ -888,6 +892,13 @@ class Tracker:
             _, score, _, loc = cv2.minMaxLoc(res)
             if score >= self.settings["match_min"]:
                 found = [ox + loc[0], oy + loc[1]]
+                # Two overview panels have identical titles, so their anchors are
+                # identical templates. Without a bound, a whole-window fallback
+                # can lock a region onto its sibling and report the wrong list.
+                if self.max_drift is not None and self.origin is not None:
+                    if (abs(found[0] - self.origin[0]) > self.max_drift
+                            or abs(found[1] - self.origin[1]) > self.max_drift):
+                        continue
                 self.drift = (found[0] - self.anchor_pos[0],
                               found[1] - self.anchor_pos[1])
                 self.anchor_pos = found

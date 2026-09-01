@@ -22,3 +22,7 @@ snapshots/
 __pycache__/
 *.pyc
 *.npy
+
+# office lock files - they embed your hostname and username
+.~lock.*#
+~$*
