@@ -2098,6 +2098,169 @@ def read_events(limit=4000):
     return out[-limit:][::-1]
 
 
+def stop_everything():
+    """Stop supervisors first, then any watcher they leave behind."""
+    killed = []
+    for pid in _supervisor_pids() + _watcher_pids():
+        if pid in killed:
+            continue
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"],
+                           capture_output=True, timeout=20,
+                           creationflags=CREATE_NO_WINDOW)
+            killed.append(pid)
+        except Exception:
+            pass
+    return killed
+
+
+def cmd_hub(args):
+    """One window to launch everything, and to say what is happening."""
+    import tkinter as tk
+    from tkinter import scrolledtext
+
+    root = tk.Tk()
+    root.title("eve-watch")
+    root.configure(padx=16, pady=12)
+    root.attributes("-topmost", True)
+
+    state = tk.Label(root, text="checking...", font=("Segoe UI", 11, "bold"),
+                     justify="left")
+    state.pack(anchor="w")
+    sub = tk.Label(root, text="", font=("Segoe UI", 9), fg="#666", justify="left")
+    sub.pack(anchor="w", pady=(0, 12))
+
+    def spawn(*cmd):
+        exe = os.path.join(HERE, ".venv", "Scripts", "pythonw.exe")
+        if not os.path.exists(exe):
+            exe = sys.executable
+        subprocess.Popen([exe, os.path.abspath(__file__), *cmd], cwd=HERE,
+                         creationflags=CREATE_NO_WINDOW)
+
+    def show_text(title, fn):
+        win = tk.Toplevel(root)
+        win.title(title)
+        win.attributes("-topmost", True)
+        win.configure(padx=12, pady=10)
+        box = scrolledtext.ScrolledText(win, width=96, height=28,
+                                        font=("Consolas", 9))
+        box.pack()
+        box.insert("1.0", "working...")
+        box.configure(state="disabled")
+
+        def work():
+            import contextlib, io
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    fn()
+            except SystemExit as exc:
+                buf.write(f"\n{exc}")
+            except Exception as exc:
+                buf.write(f"\nfailed: {exc}")
+            text = buf.getvalue()
+
+            def paint():
+                box.configure(state="normal")
+                box.delete("1.0", "end")
+                box.insert("1.0", text or "(no output)")
+                box.configure(state="disabled")
+            root.after(0, paint)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def start():
+        if start_supervisor():
+            sub.config(text="starting watchers...")
+        refresh()
+
+    def stop():
+        n = stop_everything()
+        sub.config(text=f"stopped {len(n)} process(es)")
+        refresh()
+
+    def toggle_pause():
+        if os.path.exists(PAUSEFILE):
+            cmd_resume(argparse.Namespace())
+        else:
+            cmd_pause(argparse.Namespace())
+        refresh()
+
+    def set_mode(name):
+        cmd_mode(argparse.Namespace(name=name))
+        refresh()
+
+    grid = tk.Frame(root)
+    grid.pack(anchor="w")
+
+    def button(parent, text, cmd, col, row, width=18, **kw):
+        b = tk.Button(parent, text=text, width=width, command=cmd, **kw)
+        b.grid(row=row, column=col, padx=3, pady=3, sticky="w")
+        return b
+
+    run_btn = button(grid, "Start watching", start, 0, 0)
+    stop_btn = button(grid, "Stop watching", stop, 1, 0)
+    pause_btn = button(grid, "Pause", toggle_pause, 2, 0)
+
+    button(grid, "Clients / calibrate", lambda: spawn("pick"), 0, 1)
+    button(grid, "Status", lambda: spawn("dash"), 1, 1)
+    button(grid, "Events", lambda: spawn("events"), 2, 1)
+
+    button(grid, "Check everything", lambda: show_text(
+        "doctor", lambda: cmd_doctor(argparse.Namespace(fast=False))), 0, 2)
+    button(grid, "Show config", lambda: show_text(
+        "config", lambda: cmd_list(argparse.Namespace())), 1, 2)
+    button(grid, "Console", lambda: subprocess.Popen(
+        ["cmd", "/c", "start", "", os.path.join(HERE, "console.bat")],
+        cwd=HERE, shell=False), 2, 2)
+
+    modes = tk.Frame(root)
+    modes.pack(anchor="w", pady=(10, 0))
+    tk.Label(modes, text="alerts:", font=("Segoe UI", 9)).pack(side="left")
+    mode_btns = {}
+    for name in ("active", "away", "silent"):
+        b = tk.Button(modes, text=name, width=9,
+                      command=lambda n=name: set_mode(n))
+        b.pack(side="left", padx=3)
+        mode_btns[name] = b
+
+    def refresh():
+        sup = _supervisor_pids()
+        wat = _watcher_pids()
+        sel = read_clients()
+        paused = os.path.exists(PAUSEFILE)
+        mode = read_mode(load_config()["settings"].get("mode", "away"))
+
+        if not sup:
+            state.config(text="Not watching", fg="#c22")
+        elif paused:
+            state.config(text="PAUSED", fg="#c80")
+        elif len(sup) > 1:
+            state.config(text=f"{len(sup)} supervisors - alerts will repeat",
+                         fg="#c22")
+        elif len(wat) != len(sel):
+            state.config(text=f"{len(wat)} watcher(s) for {len(sel)} client(s)",
+                         fg="#c80")
+        else:
+            state.config(text=f"Watching {len(sel)} client(s)", fg="#0a7")
+
+        sub.config(text=("  ".join(short_client(c) for c in sel) or "no clients selected")
+                        + f"     mode {mode}")
+        pause_btn.config(text="Resume" if paused else "Pause",
+                         state="normal" if sup else "disabled")
+        run_btn.config(state="disabled" if sup else "normal")
+        stop_btn.config(state="normal" if sup or wat else "disabled")
+        for name, b in mode_btns.items():
+            b.config(relief="sunken" if name == mode else "raised",
+                     font=("Segoe UI", 9, "bold" if name == mode else "normal"))
+        root.after(3000, refresh)
+
+    refresh()
+    if args.seconds:
+        root.after(int(args.seconds * 1000), root.destroy)
+    root.mainloop()
+
+
 def cmd_events(args):
     """Live view of events.csv, filterable by what produced them."""
     import tkinter as tk
@@ -3336,6 +3499,10 @@ def main():
     sp.add_argument("--name")
     sp.add_argument("--client")
     sp.set_defaults(func=cmd_learn)
+
+    sp = sub.add_parser("hub", help="one window to launch and control everything")
+    sp.add_argument("--seconds", type=float, help="auto-close (for testing)")
+    sp.set_defaults(func=cmd_hub)
 
     sp = sub.add_parser("events", help="live, filterable view of events.csv")
     sp.add_argument("--every", type=float, default=2.0,
