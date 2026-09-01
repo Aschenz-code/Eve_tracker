@@ -99,9 +99,26 @@ Common causes:
 - **You switched overview tab and the columns differ.** Re-calibrate.
 - **The client restarted.** Handled automatically — it reconnects within 30 s.
 
-## Other commands
+## Running commands by hand
 
-    eve_watch.py windows                   # which clients are running
-    eve_watch.py list                      # dump the config
-    eve_watch.py shot --client "Name"      # check regions
-    eve_watch.py tune --apply              # measure noise, set sensitivity
+Double-click **console.bat**. It opens a prompt already in the tool's folder with
+the bundled interpreter on PATH, so this works:
+
+    python eve_watch.py windows            # which clients are running
+    python eve_watch.py status             # running? paused? recent log
+    python eve_watch.py list               # dump the config
+    python eve_watch.py shot --client "Name"       # do the regions still lock?
+    python eve_watch.py calibrate --client "Name"  # rebuild that client's regions
+    python eve_watch.py tune --apply       # measure noise, set sensitivity
+
+From an ordinary PowerShell window, call the bundled interpreter by full path —
+plain `python` may be a different install that lacks the dependencies:
+
+    C:\EVE_Dev\tools\eve-watch\.venv\Scripts\python.exe C:\EVE_Dev\tools\eve-watch\eve_watch.py windows
+
+That works from any directory. If you would rather `cd` first, note that Windows
+PowerShell 5.1 needs `;` and not `&&`:
+
+    cd C:\EVE_Dev\tools\eve-watch; .venv\Scripts\python.exe eve_watch.py windows
+
+Add `--help` to any command to see its options.
