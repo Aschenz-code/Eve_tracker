@@ -1815,6 +1815,77 @@ def cmd_clone(args):
           "somewhere else on this character and needs its own select.")
 
 
+def cmd_pick(args):
+    """Tick which clients to watch. Writes CLIENTS; a running supervisor follows."""
+    import tkinter as tk
+
+    cfg = load_config()
+    configured = {}
+    for r in cfg.get("regions", []):
+        configured.setdefault(r.get("window"), []).append(r["name"])
+    live = list_windows("EVE - ")
+    watching = set(read_clients())
+    running_pids = set(_watcher_pids())
+
+    # every client we know about: running now, or configured earlier
+    titles = sorted({h["title"] for h in live} | set(configured) | watching)
+    if not titles:
+        sys.exit("No EVE clients running and none configured.")
+    live_titles = {h["title"] for h in live}
+
+    root = tk.Tk()
+    root.title("eve-watch - clients")
+    root.attributes("-topmost", True)
+    root.configure(padx=16, pady=12)
+
+    tk.Label(root, text="Tick the clients you want watched",
+             font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=3,
+                                                 sticky="w", pady=(0, 2))
+    tk.Label(root, text=f"{len(running_pids)} watcher(s) running now",
+             font=("Segoe UI", 9), fg="#666").grid(row=1, column=0, columnspan=3,
+                                                   sticky="w", pady=(0, 10))
+
+    vars_ = {}
+    for i, title in enumerate(titles):
+        v = tk.IntVar(value=1 if title in watching else 0)
+        vars_[title] = v
+        name = short_client(title)
+        regions = configured.get(title, [])
+        tk.Checkbutton(root, variable=v, text=name,
+                       font=("Segoe UI", 11)).grid(row=2 + i, column=0, sticky="w")
+        if regions:
+            detail, colour = ", ".join(sorted(regions)), "#333"
+        else:
+            detail, colour = "no regions - run calibrate first", "#b00"
+        tk.Label(root, text=detail, font=("Segoe UI", 9), fg=colour
+                 ).grid(row=2 + i, column=1, sticky="w", padx=(14, 14))
+        tk.Label(root, text="" if title in live_titles else "not running",
+                 font=("Segoe UI", 9), fg="#888").grid(row=2 + i, column=2, sticky="w")
+
+    status = tk.Label(root, text="", font=("Segoe UI", 9), fg="#060")
+    status.grid(row=2 + len(titles), column=0, columnspan=3, sticky="w", pady=(10, 4))
+
+    def save():
+        chosen = [t for t, v in vars_.items() if v.get()]
+        write_clients(chosen)
+        unconfigured = [short_client(t) for t in chosen if not configured.get(t)]
+        msg = f"Saved {len(chosen)} client(s). A running supervisor picks this up in a few seconds."
+        if unconfigured:
+            msg += f"  Note: {', '.join(unconfigured)} have no regions yet."
+        status.config(text=msg, fg="#b00" if unconfigured else "#060")
+        print(msg)
+
+    btns = tk.Frame(root)
+    btns.grid(row=3 + len(titles), column=0, columnspan=3, sticky="w")
+    tk.Button(btns, text="Save", width=12, command=save).pack(side="left")
+    tk.Button(btns, text="Close", width=12, command=root.destroy).pack(side="left",
+                                                                      padx=8)
+    if args.seconds:
+        root.after(int(args.seconds * 1000), root.destroy)
+    root.mainloop()
+    print("current selection:", read_clients())
+
+
 def cmd_supervise(args):
     """Run one watcher per selected client, following the CLIENTS file."""
     children = {}                       # title -> Popen
@@ -2567,6 +2638,11 @@ def main():
     sp.add_argument("--name")
     sp.add_argument("--client")
     sp.set_defaults(func=cmd_learn)
+
+    sp = sub.add_parser("pick", help="tick which clients to watch, in a window")
+    sp.add_argument("--seconds", type=float,
+                    help="auto-close after N seconds (used for testing)")
+    sp.set_defaults(func=cmd_pick)
 
     sp = sub.add_parser("clients", help="choose which clients to monitor")
     sp.add_argument("action", choices=["list", "add", "remove", "set"])
