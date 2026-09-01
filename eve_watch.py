@@ -2818,19 +2818,35 @@ def cmd_status(args):
             print("   " + line.rstrip())
 
 
-def _supervisor_pids():
-    """PIDs of any running `eve_watch.py supervise`."""
+def _matching_pids(pattern):
+    r"""Leaf PIDs whose command line matches `pattern`.
+
+    A venv's Scripts\python.exe is a launcher that spawns the base interpreter,
+    so both match and one process looks like two. The parent is only waiting;
+    reporting it as well makes a single supervisor look like a duplicate.
+    """
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-             "Where-Object { $_.CommandLine -like '*eve_watch*supervise*' } | "
-             "Select-Object -ExpandProperty ProcessId"],
+             "Get-CimInstance Win32_Process | Where-Object { $_.Name -in "
+             "'python.exe','pythonw.exe' -and $_.CommandLine -like '" + pattern +
+             "' } | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }"],
             capture_output=True, text=True, timeout=25,
             creationflags=CREATE_NO_WINDOW)
-        return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+        pairs = []
+        for line in out.stdout.splitlines():
+            bits = line.split()
+            if len(bits) == 2 and bits[0].isdigit() and bits[1].isdigit():
+                pairs.append((int(bits[0]), int(bits[1])))
+        parents = {ppid for _, ppid in pairs}
+        return [pid for pid, _ in pairs if pid not in parents]
     except Exception:
         return []
+
+
+def _supervisor_pids():
+    """PIDs actually running `eve_watch.py supervise`."""
+    return _matching_pids("*eve_watch*supervise*")
 
 
 def start_supervisor():
@@ -2843,29 +2859,9 @@ def start_supervisor():
 
 
 def _watcher_pids():
-    """PIDs actually running the watch loop.
+    """PIDs actually running the watch loop."""
+    return _matching_pids("*eve_watch*watch --client*")
 
-    A venv's Scripts\\python.exe is a launcher stub that spawns the base
-    interpreter as a child, so both match. Report only the leaves - the parent
-    is just waiting, and counting it looks like a duplicate watcher.
-    """
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-             "Where-Object { $_.CommandLine -like '*eve_watch*watch*' } | "
-             "ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }"],
-            capture_output=True, text=True, timeout=25,
-            creationflags=CREATE_NO_WINDOW)
-        pairs = []
-        for line in out.stdout.splitlines():
-            bits = line.split()
-            if len(bits) == 2 and bits[0].isdigit() and bits[1].isdigit():
-                pairs.append((int(bits[0]), int(bits[1])))
-        parents = {ppid for _, ppid in pairs}
-        return [pid for pid, _ in pairs if pid not in parents]
-    except Exception:
-        return []
 
 
 def cmd_tune(args):
