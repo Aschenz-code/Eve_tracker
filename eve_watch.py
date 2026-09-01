@@ -1067,6 +1067,20 @@ def find_recording(obs_dir, max_age=120):
     return None
 
 
+def csv_safe(value):
+    """Defang a spreadsheet formula without altering what the text says.
+
+    Ship and character names are chosen by other players, and they reach this
+    file verbatim. A name beginning =, +, - or @ is a formula to Excel and
+    LibreOffice, so opening the log could run it. Prefixing a zero-width-free
+    apostrophe is the standard defusal: spreadsheets treat the cell as text and
+    hide the mark, and grep still finds the name one character in.
+    """
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
 def record_event(started, region, event, detail="", snapshot="", obs_dir=None):
     """Append one row to events.csv; return (video_name, offset) for logging."""
     now = time.time()
@@ -1081,7 +1095,7 @@ def record_event(started, region, event, detail="", snapshot="", obs_dir=None):
            "unix": round(now, 3), "client": TAG,
            "elapsed_s": round(now - started, 1),
            "elapsed_hms": hms(now - started),
-           "region": region, "event": event, "detail": detail,
+           "region": region, "event": event, "detail": csv_safe(detail),
            "snapshot": os.path.relpath(snapshot, HERE) if snapshot else "",
            "video_file": os.path.basename(vid) if vid else "",
            "video_offset": offset}
