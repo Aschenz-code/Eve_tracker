@@ -712,7 +712,14 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
         wide = {"left": cell["left"] - pad, "top": cell["top"] - pad,
                 "width": cell["width"] + 2 * pad,
                 "height": cell["height"] + 2 * pad}
-        occupied.append((to_gray(crop(frame, wide)), to_gray(patch), cell))
+        # Zero the background before correlating. EVE re-shades a row when the
+        # list around it changes - the same row measured 48 then 30 - and raw
+        # correlation reads that as a different row (0.87 against a 0.95 bar).
+        # Clipping to the text leaves only glyph pixels: the same row scores
+        # 1.0000, a different one 0.35.
+        clip = st["pix_clip"]
+        occupied.append((apply_clip(to_gray(crop(frame, wide)), clip),
+                         apply_clip(to_gray(patch), clip), cell))
 
     used, fresh = set(), []
     for search, exact, cell in occupied:
@@ -3014,6 +3021,7 @@ def cmd_watch(args):
               "pix_min_lit": r.get("pix_min_lit", 20),
               "row_offset": r.get("row_offset", 0),
               "pix_pad": r.get("pix_pad", 3),
+              "pix_clip": r.get("pix_clip", s["threshold"]),
               "cfg": region_settings(r, s),
               "next_id": 0,
               "values_mtime": values_stamp(r["name"], r.get("window")),
