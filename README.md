@@ -1,180 +1,119 @@
 # eve-watch
 
-Watches one or more EVE Online clients and tells you — out loud — when something
-changes: a ship appears in your overview, a new signature shows up, a d-scan
-comes back different, the pilot count on a structure ticks over.
+Watches your EVE Online clients and tells you out loud when something changes: a
+ship appears in an overview, a new signature shows up, a d-scan comes back
+different, a counter on a structure ticks over.
 
 It reads the screen only. It never sends input to the game.
 
-## Why it works the way it does
-
-**It captures the EVE *window*, not the screen**, via Windows Graphics Capture.
-The client can be covered by another game or parked on a second monitor. It must
-be running and not minimised — a minimised window stops rendering, and the
-watcher says so out loud rather than going quiet.
-
-**Every region is anchored to nearby text.** Each frame it finds that anchor by
-template matching and reads your box at a fixed offset from it, so moving the
-camera or dragging a panel doesn't break anything. If the anchor is lost for 45
-seconds it shouts, because silently not-watching is worse than a false alarm.
-
-**Identity comes from pixels, not OCR, wherever it matters.** OCR of an unchanged
-signature row flickers between readings — measured live, it produced six phantom
-"new signature" alerts a minute. The same row compared as a bitmap scores 0.9994
-against itself and at most 0.71 against a different row. OCR is used only for the
-label a human reads.
-
-## Setup
+## Install
 
     pip install -r requirements.txt
 
-Or use the bundled `.venv` — every `.bat` here calls it directly, so it does not
-matter which Python is on your PATH.
+Windows only. Python 3.12+.
 
-## Quick start
+## First run
 
-    eve_watch.py windows                       # which clients are running
-    eve_watch.py calibrate --client "Name"     # find the panels, show what it found
-    eve_watch.py calibrate --client "Name" --yes   # write them
-    eve_watch.py shot --client "Name"          # check every anchor locks
-    eve_watch.py watch                         # go   (or double-click watch.bat)
+1. Start the clients you want watched. They must be running and **not minimised** —
+   a minimised window stops rendering and there is nothing to read. They may sit
+   behind another game or on a second monitor.
+2. Double-click **pick.bat**.
+3. Press **Calibrate** next to each client. It finds that client's Overview,
+   Probe Scanner and Directional Scanner panels, shows you what it found, and
+   writes the regions when you press Apply.
+4. Tick the clients (and any individual regions) you want, then **Save**.
 
-`calibrate` reads the client's own screen: it finds each Overview, Probe Scanner
-and Directional Scanner by its title text, works out the columns from the header
-row, measures the row spacing from real rows, and cuts anchors. It numbers
-repeats automatically, so five overviews become `overview` … `overview5`, each
-with a `max_drift` small enough that they cannot be confused with one another.
+That's it — Save starts the watchers. A client cannot be ticked until it has been
+calibrated, and once calibrated it stays that way.
 
-It prints what it found and changes nothing without `--yes`. Two things to know:
+Before calibrating, make sure **each list has at least two rows** in it. A list
+with fewer cannot reveal its row spacing; calibrate will say `ROW SPACING
+GUESSED` if it has to fall back. An empty d-scan is skipped entirely, because EVE
+stops drawing column headers when there are no results — run a scan first.
 
-- **Have at least two rows in each list.** A list with fewer cannot reveal its own
-  row spacing. It will borrow a measured value from another client at the same
-  window size if one exists, and otherwise says `ROW SPACING GUESSED` — rows
-  further down the list may then drift out of alignment.
-- **An empty d-scan has no column headers**, because EVE stops drawing them. Run
-  a scan first, or that panel is skipped with a message saying so.
+## Everyday use
 
-The structure-bracket counter is not calibratable — it floats in space and has no
-panel title to find. Use `select` for that one.
+| do this | with |
+|---|---|
+| add / remove clients or regions | **pick.bat** |
+| stop alerting, keep watching | **pause.bat** / **resume.bat** (all clients) |
+| change how loudly it alerts | **mode-active.bat** / **mode-away.bat** / **mode-silent.bat** |
+| check it is alive | **status.bat** |
+| start watching after a reboot | **watch.bat** (single client) or `eve_watch.py supervise` |
 
-## Region modes
-
-| mode | alerts when | used for |
-|---|---|---|
-| `change` | the box's contents change and stay changed | a count on a structure |
-| `presence` | an empty box gains content | a filtered overview tab |
-| `roster` | a new row appears in a list, and names it | overview, signatures |
-| `dscan` | the result set changes; logs it, silent by default | directional scanner |
-
-`roster` and `dscan` read row text with the OCR engine built into Windows — no
-install, no model download, ~50 ms — and only when the pixels actually moved.
-
-## Alert profiles
+Alert profiles:
 
 | mode | beep | voice | popup | repeats |
 |---|---|---|---|---|
 | `active` | yes | yes | no | 2 |
-| `away` | yes | yes | yes | 3, nags until dismissed |
+| `away` | yes | yes | yes | 3, until dismissed |
 | `silent` | no | no | no | logs only |
 
-    eve_watch.py mode active        # or double-click mode-active.bat
+Alerts lead with the client name — *"Scout. new contact in the overview. \<pilot\>
+\<ship\>"* — so you know which window to open.
 
-Switchable while running; the change lands within a couple of seconds.
+## The structure counter
 
-## Several clients at once
+Calibrate cannot configure this one: it is a bracket floating in space with no
+panel title to find. Set it up by hand on whichever client sits on grid:
 
-    eve_watch.py clients list                  # configured vs running
-    eve_watch.py clients add "Scout"           # start monitoring one
-    eve_watch.py clone --from "Main" --to "Scout" --only dscan,overview,sigs
-    eve_watch.py supervise                     # one watcher per selected client
+    eve_watch.py select --name structure --client "Your Character"
 
-Regions belong to a client, so a scout can watch overview + signatures + d-scan
-with no structure tracker at all. Alerts lead with the client name — *"Scout. new
-contact in the overview. \<pilot\> \<ship\>"* — so you know which window to open.
+Three drags: a rough box, then the number itself, then a nearby piece of steady
+text as an anchor.
 
-`clients add` takes effect within seconds; no restart when you log a character in.
+To have it report the actual number rather than just "it changed", teach it each
+value once while that value is on screen — **learn.bat**, or:
 
-## More than one overview window
+    eve_watch.py learn --name structure --value 4
 
-Regions are independent, so watch as many as you like — give each its own name:
-
-    eve_watch.py select --mode roster --name overview  --client "Name"
-    eve_watch.py select --mode roster --name overview2 --client "Name"
-
-One catch worth knowing. Every overview panel's title begins `Overview (`, so
-their anchors are **identical templates**. If a region ever fails its local
-search it falls back to scanning the whole window, and with two panels open it
-can lock onto the wrong one and report the wrong list — silently, because both
-matches score about 1.000.
-
-`max_drift` prevents that: it is the furthest, in pixels, an anchor may be found
-from where it was set up.
-
-    "max_drift": 200
-
-Set it on every docked panel; 200 is a good default, and it should be comfortably
-smaller than the distance between two panels that look alike. Leave it off for a
-region anchored to a bracket floating in space, which legitimately moves anywhere
-on screen.
-
-If a panel really does move further than `max_drift`, the region reports itself
-lost and says so out loud — the safe failure, rather than quietly watching the
-wrong window.
-
-## Reading a value, not just "it changed"
-
-`change` mode detects that pixels moved, not what they say. To have it report an
-actual number, teach it each value once while that value is on screen:
-
-    eve_watch.py learn --name structure --value 4      # or learn.bat
-
-It compares against everything it already knows and prints the margin, so you can
-see a new digit is genuinely distinguishable. Until a value is taught it reports
-`?` rather than guessing — detection still works, only the label is unknown.
+Until a value is taught it reports `?`. Detection still works; only the label is
+unknown. A running watcher picks up new values within seconds.
 
 ## Output
 
-- `events.log` — human-readable running log, with a heartbeat every 60 s.
-- `events.csv` — one row per event: time, client, region, event, detail, snapshot,
-  and the timecode **inside your OBS recording** if you pass `--obs-dir`.
-- `snapshots/events/` — a PNG saved at the instant of each alert.
+- `events.log` — running log, with a heartbeat every 60 s.
+- `events.csv` — one row per event: time, client, region, event, detail, snapshot.
+- `snapshots/events/` — a PNG saved at the moment of each alert.
 - `snapshots/baseline/` — what each region saw at startup, for checking aim.
+
+To get the timecode **inside your OBS recording** on every event, set `obs_dir` in
+`config.json` to your OBS output folder.
+
+## If something looks wrong
+
+    eve_watch.py shot --client "Name"      # does every region still lock?
+
+Anything reporting `ANCHOR LOST` is not being watched. The watcher also says so
+out loud after 45 seconds, and logs `...alive but BLIND` if the client stops
+producing frames at all.
+
+Common causes:
+
+- **You changed EVE's UI scale.** Anchors and taught values are fixed-size
+  bitmaps; they all break. Re-calibrate, and re-teach any counter values.
+- **You resized the EVE window.** Same fix.
+- **You moved a panel a long way.** Regions refuse to follow further than
+  `max_drift` (200 px), because two overview panels look identical to the matcher
+  and it must not lock onto the wrong one. Re-calibrate.
+- **You switched overview tab and the columns differ.** Re-calibrate.
+- **The client restarted.** Handled automatically — it reconnects within 30 s.
+
+## Sharing it
+
+Share the code, never the configuration. `config.json`, `anchor_*.png` and
+`values/` are excluded from git deliberately: they are pixel geometry tied to one
+person's UI scale, resolution and window layout, and will not work anywhere else.
+`events.log` and `events.csv` are excluded too — they hold signature IDs and pilot
+names.
+
+A new user clones, installs, and runs **pick.bat** → Calibrate. Sharing an
+overview export (EVE writes these to `Documents/EVE/Overview`) makes everyone's
+columns match, which helps but is not required.
 
 ## Other commands
 
-    eve_watch.py pause | resume | status       # or the matching .bat files
-    eve_watch.py tune --apply                  # measure noise, set sensitivity
-    eve_watch.py list                          # dump the config
-
-## Sharing this with other people
-
-Share the **code**, never the coordinates. `config.json`, `anchor_*.png` and
-`values/` are all excluded from git on purpose: they are pixel geometry captured
-at one person's UI scale, resolution and window layout, and they will not work on
-anyone else's machine. `events.log` and `events.csv` are excluded too — they hold
-signature IDs and pilot names.
-
-So the install for a corp mate is: clone, `pip install -r requirements.txt`, then
-build their own regions with `select` (and `learn` for any counted value).
-
-Two things make that much less painful:
-
-- **Share an overview export** (EVE saves these to `Documents/EVE/Overview`, and
-  there is a Share button that drops one into chat). Identical tabs and columns
-  mean identical column boundaries, which is what the row parsing depends on.
-- **Anchor on panel titles, not column headers.** A header-strip anchor breaks the
-  moment someone's column widths differ. Anchor on the word `Overview (`, or
-  `Directional Scanner` — but *not* including the overview preset name, which
-  changes when you switch tabs.
-
-## Known limits
-
-- The client must be running and not minimised.
-- Changing EVE's **UI scale** invalidates every anchor and every taught value —
-  they are fixed-size bitmaps. The watcher will tell you, loudly, but you have to
-  re-`select`.
-- Resizing the EVE window invalidates saved coordinates.
-- OCR labels are imperfect (`ABC-12O` for `ABC-120`). This affects only the text
-  you read, not detection, because identity is pixel-based.
-- A region anchored to a bracket floating in space disappears when that object
-  leaves the view. Docked panels are far more reliable targets.
+    eve_watch.py windows                   # which clients are running
+    eve_watch.py list                      # dump the config
+    eve_watch.py shot --client "Name"      # check regions
+    eve_watch.py tune --apply              # measure noise, set sensitivity
