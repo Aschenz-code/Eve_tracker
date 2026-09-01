@@ -1,0 +1,24 @@
+# --- per-install, never share -------------------------------------------
+# Anchors and taught glyphs are bitmaps captured at YOUR ui scale and layout.
+# They are meaningless on another machine and must be regenerated locally.
+anchor_*.png
+values/
+config.json
+config.json.*
+*.bak
+CLIENTS
+MODE
+PAUSED
+
+# --- your gameplay data, not the tool ------------------------------------
+# events.* contain signature ids, pilot names and system names. Keep them out
+# of a shared repo.
+events.log
+events.csv
+snapshots/
+
+# --- environment ----------------------------------------------------------
+.venv/
+__pycache__/
+*.pyc
+*.npy

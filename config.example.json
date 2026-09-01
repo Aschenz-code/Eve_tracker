@@ -1,0 +1,131 @@
+{
+  "regions": [
+    {
+      "name": "structure",
+      "mode": "change",
+      "zoom": false,
+      "alert": true,
+      "say": "structure count changed",
+      "key_width": null,
+      "target": {
+        "left": 1462,
+        "top": 719,
+        "width": 22,
+        "height": 18
+      },
+      "anchor": {
+        "left": 1340,
+        "top": 718,
+        "width": 118,
+        "height": 19
+      },
+      "window": "EVE - Your Character",
+      "win_width": 2560,
+      "win_height": 1440,
+      "match": "ncc",
+      "ncc_min": 0.95,
+      "clip": 90
+    },
+    {
+      "name": "overview",
+      "mode": "roster",
+      "zoom": true,
+      "alert": true,
+      "say": "new contact in the overview",
+      "key_width": 296,
+      "target": {
+        "left": 2044,
+        "top": 277,
+        "width": 456,
+        "height": 600
+      },
+      "anchor": {
+        "left": 2045,
+        "top": 256,
+        "width": 440,
+        "height": 16
+      },
+      "window": "EVE - Your Character",
+      "win_width": 2560,
+      "win_height": 1440,
+      "identity": "text",
+      "ignore": [
+        "Fortizar",
+        "Some Structure",
+        "Sun"
+      ]
+    },
+    {
+      "name": "dscan",
+      "mode": "dscan",
+      "zoom": true,
+      "alert": false,
+      "say": "d-scan updated",
+      "key_width": null,
+      "target": {
+        "left": 1800,
+        "top": 988,
+        "width": 340,
+        "height": 380
+      },
+      "anchor": {
+        "left": 1775,
+        "top": 906,
+        "width": 108,
+        "height": 19
+      },
+      "window": "EVE - Your Character",
+      "win_width": 2560,
+      "win_height": 1440,
+      "ignore": []
+    },
+    {
+      "name": "sigs",
+      "window": "EVE - Your Character",
+      "mode": "roster",
+      "win_width": 2560,
+      "win_height": 1440,
+      "target": {
+        "left": 2270,
+        "top": 978,
+        "width": 190,
+        "height": 240
+      },
+      "anchor": {
+        "left": 2200,
+        "top": 958,
+        "width": 320,
+        "height": 16
+      },
+      "key_width": 85,
+      "roster_fuzzy": 1.0,
+      "zoom": true,
+      "alert": true,
+      "say": "new signature on the probe scanner",
+      "identity": "pixels",
+      "row_pitch": 20,
+      "row_height": 18,
+      "pix_ncc": 0.95,
+      "pix_min_lit": 20,
+      "row_offset": 8,
+      "ignore": []
+    }
+  ],
+  "settings": {
+    "threshold": 110,
+    "sensitivity": 6,
+    "presence_pixels": 20,
+    "interval": 1.0,
+    "stable": 3,
+    "pad": 300,
+    "search_radius": 200,
+    "match_min": 0.72,
+    "obs_dir": null,
+    "ocr_scale": 3,
+    "ignore": [],
+    "roster_period": 5.0,
+    "roster_confirm": 2,
+    "roster_fuzzy": 0.86,
+    "clipboard_sigs": true
+  }
+}
