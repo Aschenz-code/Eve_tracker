@@ -34,9 +34,28 @@ matter which Python is on your PATH.
 ## Quick start
 
     eve_watch.py windows                       # which clients are running
-    eve_watch.py select --client "Name"        # drag a box; repeat per region
-    eve_watch.py shot                          # check every anchor still locks
+    eve_watch.py calibrate --client "Name"     # find the panels, show what it found
+    eve_watch.py calibrate --client "Name" --yes   # write them
+    eve_watch.py shot --client "Name"          # check every anchor locks
     eve_watch.py watch                         # go   (or double-click watch.bat)
+
+`calibrate` reads the client's own screen: it finds each Overview, Probe Scanner
+and Directional Scanner by its title text, works out the columns from the header
+row, measures the row spacing from real rows, and cuts anchors. It numbers
+repeats automatically, so five overviews become `overview` … `overview5`, each
+with a `max_drift` small enough that they cannot be confused with one another.
+
+It prints what it found and changes nothing without `--yes`. Two things to know:
+
+- **Have at least two rows in each list.** A list with fewer cannot reveal its own
+  row spacing. It will borrow a measured value from another client at the same
+  window size if one exists, and otherwise says `ROW SPACING GUESSED` — rows
+  further down the list may then drift out of alignment.
+- **An empty d-scan has no column headers**, because EVE stops drawing them. Run
+  a scan first, or that panel is skipped with a message saying so.
+
+The structure-bracket counter is not calibratable — it floats in space and has no
+panel title to find. Use `select` for that one.
 
 ## Region modes
 

@@ -46,6 +46,7 @@ import difflib
 import json
 import os
 import re
+import statistics
 import subprocess
 import sys
 import threading
@@ -420,6 +421,56 @@ def ocr_engine():
         log(f"!! OCR unavailable ({exc}) - roster rows cannot be named")
         _ocr_failed = True
     return _ocr_engine
+
+
+def ocr_words(pil, scale=2, origin=(0, 0)):
+    """Every word with its box, in the coordinates of the frame it came from."""
+    eng = ocr_engine()
+    if eng is None:
+        return []
+    import asyncio
+    from winsdk.windows.graphics.imaging import (BitmapAlphaMode, BitmapPixelFormat,
+                                                 SoftwareBitmap)
+    from winsdk.windows.security.cryptography import CryptographicBuffer
+
+    im = pil.resize((pil.width * scale, pil.height * scale), Image.LANCZOS).convert("RGBA")
+    raw = im.tobytes()
+    buf = bytearray(raw)
+    buf[0::4], buf[2::4] = raw[2::4], raw[0::4]
+    try:
+        bmp = SoftwareBitmap.create_copy_from_buffer(
+            CryptographicBuffer.create_from_byte_array(bytes(buf)),
+            BitmapPixelFormat.BGRA8, im.width, im.height, BitmapAlphaMode.STRAIGHT)
+
+        async def _go():
+            return await eng.recognize_async(bmp)
+
+        res = asyncio.run(_go())
+    except Exception as exc:
+        log(f"  OCR pass failed: {exc}")
+        return []
+
+    out = []
+    for line in res.lines:
+        for w in line.words:
+            r = w.bounding_rect
+            out.append({"text": w.text,
+                        "x": round(origin[0] + r.x / scale),
+                        "y": round(origin[1] + r.y / scale),
+                        "w": round(r.width / scale),
+                        "h": round(r.height / scale)})
+    return out
+
+
+def looks_like(word, expected, cutoff=0.68):
+    """Fuzzy header match - OCR renders Type as 'Tupe' and Group as 'Gro'."""
+    a = re.sub(r"[^a-z]", "", word.lower())
+    b = expected.lower()
+    if not a:
+        return False
+    if a == b or b.startswith(a) and len(a) >= 3:
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= cutoff
 
 
 def ocr_rows(pil, scale=3, key_width=None):
@@ -1187,6 +1238,279 @@ def cmd_windows(args):
     for h in hits:
         flag = "   [MINIMISED - cannot be captured]" if h["minimized"] else ""
         print(f"  {h['width']}x{h['height']}  hwnd={h['hwnd']}  {h['title']!r}{flag}")
+
+
+PANELS = [
+    {"kind": "overview", "title": ["overview"], "mode": "roster",
+     "headers": ["distance", "name", "type", "corporation", "alliance", "velocity"],
+     "id_upto": "corporation", "id_from": "name",
+     "say": "new contact in {label}", "ignore": ["Sun", "Fortizar"]},
+    {"kind": "sigs", "title": ["probe", "scanner"], "mode": "roster",
+     "headers": ["distance", "id", "name", "group", "signal"],
+     "id_upto": "name", "id_from": "id",
+     "say": "new signature on the probe scanner",
+     # the panel footer sits below the list and would otherwise be tracked as a row
+     "ignore": ["launched", "No Results"]},
+    {"kind": "dscan", "title": ["directional", "scanner"], "mode": "dscan",
+     "headers": ["distance", "name", "type"],
+     "id_upto": None, "id_from": "name",
+     "say": "d-scan updated", "ignore": ["No Scan Results"]},
+]
+
+
+def find_panels(words):
+    """Locate each known panel by its title text. Returns one entry per panel."""
+    found = []
+    for spec in PANELS:
+        first = spec["title"][0]
+        for w in words:
+            if not looks_like(w["text"], first):
+                continue
+            # multi-word titles must have the rest following on the same line
+            ok, cursor = True, w
+            for nxt in spec["title"][1:]:
+                cand = [z for z in words
+                        if abs(z["y"] - w["y"]) <= w["h"]
+                        and 0 < z["x"] - (cursor["x"] + cursor["w"]) < 30
+                        and looks_like(z["text"], nxt)]
+                if not cand:
+                    ok = False
+                    break
+                cursor = cand[0]
+            if ok:
+                found.append({"spec": spec, "title_x": w["x"], "title_y": w["y"],
+                              "title_h": w["h"], "title_end": cursor["x"] + cursor["w"]})
+    return found
+
+
+def panel_bounds(panel, panels, frame_w, frame_h):
+    """The screen area this panel owns, stopping at its neighbours.
+
+    Panels sit side by side with their column headers on the same line, so a
+    search window that is merely "near the title" swallows the neighbour's
+    columns and places the box on the wrong panel entirely.
+    """
+    x_lo = panel["title_x"] - 20
+    rights = [q["title_x"] for q in panels
+              if q is not panel and q["title_x"] > panel["title_x"] + 40
+              and abs(q["title_y"] - panel["title_y"]) < 40]
+    x_hi = (min(rights) - 10) if rights else frame_w - 4
+
+    y_lo = panel["title_y"]
+    belows = [q["title_y"] for q in panels
+              if q is not panel and q["title_y"] > panel["title_y"] + 60
+              and x_lo - 40 < q["title_x"] < x_hi]
+    y_hi = (min(belows) - 10) if belows else frame_h - 8
+    return x_lo, x_hi, y_lo, y_hi
+
+
+def panel_geometry(panel, words, bounds):
+    """Work out the header row, columns and row pitch of one panel."""
+    spec = panel["spec"]
+    x_lo, x_hi, y_lo, y_hi = bounds
+    below = [w for w in words
+             if y_lo < w["y"] < min(y_hi, y_lo + 170) and x_lo <= w["x"] < x_hi]
+
+    # the header row is the first line under the title holding known header words
+    rows = {}
+    for w in below:
+        rows.setdefault(round(w["y"] / 6) * 6, []).append(w)
+    header_y, header = None, {}
+    for y in sorted(rows):
+        hits = {}
+        for w in rows[y]:
+            for name in spec["headers"]:
+                if name not in hits and looks_like(w["text"], name):
+                    hits[name] = w
+        if len(hits) >= 2:
+            header_y, header = y, hits
+            break
+    if not header:
+        return {"error": "no column headers visible - the list is empty, so EVE "
+                         "is not drawing them. Put something in it and re-run."}
+
+    # data rows: lines below the header, spaced evenly
+    data_ys = sorted({round(w["y"]) for w in below if w["y"] > header_y + 6})
+    merged = []
+    for y in data_ys:
+        if not merged or y - merged[-1] > 4:
+            merged.append(y)
+    gaps = [b - a for a, b in zip(merged, merged[1:]) if 8 <= b - a <= 60]
+    pitch = round(statistics.median(gaps)) if gaps else None
+    measured = pitch is not None
+    if pitch is None and merged:
+        # one row only: the header-to-row gap is within a pixel of the true pitch,
+        # whereas guessing from glyph height is not close enough to align slots
+        pitch = max(16, merged[0] - header_y)
+    if pitch is None:
+        pitch = max(16, round(panel["title_h"] * 2.1))
+
+    first_row = merged[0] if merged else header_y + pitch
+    left_col = header.get(spec["id_from"])
+    if left_col is None:
+        # the id column header is often unreadable; take the column just right
+        # of Distance rather than falling back to Distance itself, which churns
+        ordered = sorted(header.values(), key=lambda w: w["x"])
+        if "distance" in header:
+            d = header["distance"]
+            left_col = {"x": d["x"] + d["w"] + 15, "w": 0}
+        else:
+            left_col = ordered[0]
+    right_edge = max(min(w["x"] + w["w"], x_hi) for w in header.values())
+
+    box_left = left_col["x"] - 7
+    key_width = None
+    if spec["id_upto"] and spec["id_upto"] in header:
+        key_width = header[spec["id_upto"]]["x"] - box_left - 4
+    if key_width is not None and key_width < 20:
+        key_width = None
+
+    return {"header_y": header_y, "first_row": first_row, "pitch": pitch,
+            "measured_pitch": measured, "box_left": box_left,
+            "box_right": min(x_hi, right_edge + 6), "key_width": key_width,
+            "columns": {k: v["x"] for k, v in header.items()}}
+
+
+def known_pitch(cfg, kind, win_w, win_h):
+    """A row pitch already measured for this kind of panel at this window size.
+
+    A list with fewer than two rows cannot reveal its own spacing, but the same
+    panel on another client at the same UI scale can - and that is exact, where
+    guessing from the header gap is a pixel or two out and drifts down the list.
+    """
+    for r in cfg.get("regions", []):
+        if (r.get("row_pitch") and r.get("win_width") == win_w
+                and r.get("win_height") == win_h
+                and re.sub(r"\d+$", "", r["name"]) == kind):
+            return r["row_pitch"]
+    return None
+
+
+def cmd_calibrate(args):
+    """Build this client's regions by reading its panels off the screen.
+
+    Coordinates are never portable - they are pixel geometry tied to one UI
+    scale, resolution and window layout. Rather than ship a config, each install
+    derives its own: find every panel by its title, read the column headers to
+    place the box, measure the row pitch from real rows, and cut anchors from
+    this screen.
+    """
+    win = resolve_window(args.client)
+    frame = one_frame(win["hwnd"], 0.5)
+    fh, fw = frame.shape[0], frame.shape[1]
+    cfg = load_config()
+    s = cfg["settings"]
+
+    log(f"calibrating {win['title']!r} ({fw}x{fh})")
+    words = ocr_words(to_image(frame), 2)
+    if not words:
+        sys.exit("OCR returned nothing - is the client rendering?")
+    panels = find_panels(words)
+    if not panels:
+        sys.exit("Found no Overview / Probe Scanner / Directional Scanner panels.")
+
+    # number repeats: overview, overview2, ...
+    seen, proposals = {}, []
+    for p in sorted(panels, key=lambda p: (p["spec"]["kind"], p["title_x"])):
+        kind = p["spec"]["kind"]
+        seen[kind] = seen.get(kind, 0) + 1
+        p["label"] = kind if seen[kind] == 1 else f"{kind}{seen[kind]}"
+        proposals.append(p)
+
+    # a panel may only claim space up to the next panel to its right / below
+    for p in proposals:
+        x_lo, x_hi, y_lo, y_hi = panel_bounds(p, proposals, fw, fh)
+        geo = panel_geometry(p, words, (x_lo, x_hi, y_lo, y_hi))
+        if geo and "error" not in geo and not geo["measured_pitch"]:
+            borrowed = known_pitch(cfg, p["spec"]["kind"], fw, fh)
+            if borrowed:
+                geo["pitch"] = borrowed
+                geo["borrowed_pitch"] = True
+        if geo is None or "error" in geo:
+            p["geo"] = None
+            p["error"] = (geo or {}).get("error", "could not read its columns")
+            continue
+        geo["box_right"] = min(geo["box_right"], x_hi)
+        geo["box_bottom"] = min(y_hi, geo["first_row"] + 520)
+        p["geo"] = geo
+
+    regions, report = [], []
+    for p in proposals:
+        geo, spec = p["geo"], p["spec"]
+        if geo is None:
+            report.append((p["label"], "SKIPPED - " + p.get("error", "unknown")))
+            continue
+        anchor = {"left": p["title_x"] - 3, "top": p["title_y"] - 4,
+                  "width": (p["title_end"] - p["title_x"]) + 14,
+                  "height": p["title_h"] + 8}
+        # never let a region reach a lookalike panel: half the gap to the nearest
+        # same-kind title, capped
+        same = [abs(q["title_x"] - p["title_x"]) + abs(q["title_y"] - p["title_y"])
+                for q in proposals if q is not p and q["spec"]["kind"] == spec["kind"]]
+        drift = max(40, min(200, (min(same) // 2) - 10)) if same else 200
+        top = geo["first_row"] - 8
+        region = {
+            "name": p["label"], "window": win["title"], "mode": spec["mode"],
+            "win_width": fw, "win_height": fh,
+            "target": {"left": geo["box_left"], "top": top,
+                       "width": max(60, geo["box_right"] - geo["box_left"]),
+                       "height": max(2 * geo["pitch"], geo["box_bottom"] - top)},
+            "anchor": anchor, "key_width": geo["key_width"],
+            "max_drift": drift, "ignore": list(spec["ignore"]),
+            "zoom": True, "alert": spec["mode"] != "dscan",
+            "say": spec["say"].format(label=p["label"]),
+        }
+        if spec["mode"] == "roster":
+            region.update(identity="pixels", row_pitch=geo["pitch"],
+                          row_height=max(8, geo["pitch"] - 2), row_offset=8,
+                          pix_ncc=0.95, pix_min_lit=20)
+        regions.append(region)
+        report.append((p["label"],
+                       f"box {region['target']['width']}x{region['target']['height']} "
+                       f"at ({region['target']['left']},{top})  "
+                       f"pitch {geo['pitch']}"
+                       f"{'' if geo['measured_pitch'] else (' (from another client)' if geo.get('borrowed_pitch') else ' (ASSUMED)')}  "
+                       f"key_width {geo['key_width']}  max_drift {drift}"))
+
+    print(f"\nFound {len(regions)} panel(s) in {win['title']!r}:\n")
+    for label, line in report:
+        print(f"   {label:12s} {line}")
+    for r in regions:
+        box = crop(frame, r["target"])
+        rows = [x["text"] for x in ocr_rows(to_image(box), s["ocr_scale"],
+                                            r.get("key_width"))]
+        print(f"\n   {r['name']} currently reads:")
+        for t in rows[:6] or ["(empty)"]:
+            print(f"        {t}")
+
+    if not any(g for g in (p["geo"] for p in proposals)):
+        sys.exit("\nNothing usable found.")
+    solid = {p["label"] for p in proposals if p["geo"]
+             and (p["geo"].get("measured_pitch") or p["geo"].get("borrowed_pitch"))}
+    guessed = [r["name"] for r in regions
+               if r.get("row_pitch") and r["name"] not in solid]
+    if guessed:
+        print(f"\n  !! ROW SPACING GUESSED for {', '.join(guessed)} - those lists")
+        print("     hold fewer than two rows, so the spacing could not be measured")
+        print("     and rows further down may drift out of alignment.")
+        print("     Re-run calibrate once each list has at least two entries.")
+
+    if not args.yes:
+        print("\nRe-run with --yes to write these regions "
+              "(existing regions for this client are replaced).")
+        return
+
+    for r in regions:
+        Image.fromarray(to_gray(crop(frame, r["anchor"]))).save(
+            os.path.join(HERE, f"anchor_{slug(win['title'])}_{r['name']}.png"))
+    keep = [r for r in cfg["regions"]
+            if r.get("window") != win["title"]
+            or r["name"] not in {x["name"] for x in regions}]
+    cfg["regions"] = keep + regions
+    save_config(cfg)
+    print(f"\nWrote {len(regions)} region(s). Check them with:")
+    print(f"    eve_watch.py shot --client {short_client(win['title'])!r}")
+    print("Anything reporting LOST needs its panel visible, or a manual select.")
 
 
 def cmd_select(args):
@@ -2204,6 +2528,12 @@ def main():
     sp = sub.add_parser("windows", help="list candidate windows")
     sp.add_argument("--filter", default="EVE - ")
     sp.set_defaults(func=cmd_windows)
+
+    sp = sub.add_parser("calibrate",
+                        help="find this client's panels and build its regions")
+    sp.add_argument("--client")
+    sp.add_argument("--yes", action="store_true", help="write the config")
+    sp.set_defaults(func=cmd_calibrate)
 
     sp = sub.add_parser("select", help="pick a region to watch")
     sp.add_argument("--name", default="structure")
