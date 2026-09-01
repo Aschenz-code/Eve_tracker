@@ -26,3 +26,5 @@ __pycache__/
 # office lock files - they embed your hostname and username
 .~lock.*#
 ~$*
+config.json.tmp
+config.json.prev

@@ -47,6 +47,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -118,16 +119,43 @@ user32 = ctypes.windll.user32
 def load_config():
     cfg = {"regions": [], "settings": dict(DEFAULTS)}
     if os.path.exists(CONFIG):
-        with open(CONFIG, "r", encoding="utf-8") as fh:
-            disk = json.load(fh)
+        try:
+            with open(CONFIG, "r", encoding="utf-8") as fh:
+                disk = json.load(fh)
+        except (json.JSONDecodeError, OSError) as exc:
+            prev = CONFIG + ".prev"
+            if os.path.exists(prev):
+                log(f"!! {os.path.basename(CONFIG)} is unreadable ({exc}); "
+                    f"falling back to the previous copy")
+                with open(prev, "r", encoding="utf-8") as fh:
+                    disk = json.load(fh)
+            else:
+                raise RuntimeError(
+                    f"{CONFIG} is corrupt ({exc}) and there is no .prev copy. "
+                    f"Re-run calibrate to rebuild it.") from exc
         cfg["regions"] = disk.get("regions", [])
         cfg["settings"].update(disk.get("settings", {}))
     return cfg
 
 
 def save_config(cfg):
-    with open(CONFIG, "w", encoding="utf-8") as fh:
+    """Write the config atomically, keeping the previous one.
+
+    A plain write truncates the file first, so a process killed mid-dump leaves
+    a half-written config that will not parse - which took every region with it.
+    Writing to a temporary file and replacing is atomic on Windows.
+    """
+    tmp = CONFIG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    if os.path.exists(CONFIG):
+        try:
+            shutil.copyfile(CONFIG, CONFIG + ".prev")
+        except OSError:
+            pass
+    os.replace(tmp, CONFIG)
 
 
 def regions_for(regions, window_title):
@@ -2911,7 +2939,16 @@ def cmd_pick(args):
     def rebuild():
         for w in body.winfo_children():
             w.destroy()
-        cfg = load_config()
+        try:
+            cfg = load_config()
+        except Exception as exc:
+            tk.Label(body, text="Could not read the configuration",
+                     font=("Segoe UI", 11, "bold"), fg="#c22").grid(sticky="w")
+            tk.Label(body, text=str(exc), font=("Segoe UI", 9), fg="#666",
+                     wraplength=560, justify="left").grid(sticky="w", pady=(4, 8))
+            tk.Button(body, text="Retry", width=12,
+                      command=rebuild).grid(sticky="w")
+            return
         by_client = {}
         for r in cfg.get("regions", []):
             by_client.setdefault(r.get("window"), []).append(r)
