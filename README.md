@@ -99,18 +99,6 @@ Common causes:
 - **You switched overview tab and the columns differ.** Re-calibrate.
 - **The client restarted.** Handled automatically — it reconnects within 30 s.
 
-## Sharing it
-
-Share the code, never the configuration. `config.json`, `anchor_*.png` and
-`values/` are excluded from git deliberately: they are pixel geometry tied to one
-person's UI scale, resolution and window layout, and will not work anywhere else.
-`events.log` and `events.csv` are excluded too — they hold signature IDs and pilot
-names.
-
-A new user clones, installs, and runs **pick.bat** → Calibrate. Sharing an
-overview export (EVE writes these to `Documents/EVE/Overview`) makes everyone's
-columns match, which helps but is not required.
-
 ## Other commands
 
     eve_watch.py windows                   # which clients are running
