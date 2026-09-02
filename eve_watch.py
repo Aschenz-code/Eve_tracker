@@ -3055,22 +3055,25 @@ def cmd_events(args):
         for who in rows:
             # most-flown ship first: what someone usually undocks in is the
             # useful fact, not whatever they happened to be in last
-            def listed(book_field):
-                """Every reading, most-seen first, with how often it was seen.
+            def listed(book_field, counts=True):
+                """Every reading, most-seen first.
 
-                Hiding one-off readings to suppress OCR wobble also hid the
-                single most interesting thing in the book - a pilot who turned
-                up once in a Naglfar rather than the Astero it flies daily.
-                The count says which readings to trust; nothing is concealed.
+                Ships carry their count: "Astero x17, Naglfar x1" says what
+                someone usually undocks in and what they brought once, and
+                hiding the rare one would drop the most interesting fact in the
+                book. A corp count says nothing - a pilot is in one corp - so
+                the ticker stands on its own.
                 """
                 items = sorted(book_field.items(),
                                key=lambda kv: (-kv[1].get("count", 0), kv[0]))
+                if not counts:
+                    return ", ".join(k for k, _ in items)
                 return ", ".join(f"{k} x{v.get('count', 0)}" for k, v in items)
 
             ships = list(who.get("ships", {}))
             corps = list(who.get("corps", {}))
             ship_s = listed(who.get("ships", {}))
-            corp_s = listed(who.get("corps", {}))
+            corp_s = listed(who.get("corps", {}), counts=False)
             blob = f"{who.get('name','')} {ship_s} {corp_s}".lower()
             if need and need not in blob:
                 continue
