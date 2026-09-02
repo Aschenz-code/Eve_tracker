@@ -59,6 +59,18 @@ Alert profiles:
 Alerts lead with the client name — *"Scout. new contact in the overview. \<pilot\>
 \<ship\>"* — so you know which window to open.
 
+## Docking
+
+If a client watches both an overview and the structure counter, the two are
+read together. The count going up as someone leaves the overview is that person
+docking; going down as someone appears is them undocking. It is logged as
+`docked` / `undocked` against the pilot and shown in the Pilots tab.
+
+It is an inference, not a fact: the count also moves for people who were never
+on your overview, and only the client holding the structure region can pair the
+two. On the history it was measured against, all 16 count changes matched the
+expected direction within five seconds.
+
 ## The structure counter
 
 Calibrate cannot configure this one: it is a bracket floating in space with no
@@ -84,8 +96,9 @@ unknown. A running watcher picks up new values within seconds.
 - `snapshots/events/` — a PNG saved at the moment of each alert.
 - `snapshots/baseline/` — what each region saw at startup, for checking aim.
 - `pilots.json` — every name seen in an overview, with the ships they have
-  flown, their corp tickers, when they were first and last seen, and on which
-  client. Browse it in the **Pilots** tab of events.bat. It needs column
+  flown, their corp tickers, when they were first and last seen, whether they
+  were last coming or going, which client saw them last, and how often they
+  have docked or undocked. Browse it in the **Pilots** tab of events.bat. It needs column
   positions, which calibrate reads off the overview header, so a client
   calibrated before this existed records nothing until re-calibrated once -
   doctor.bat says which.

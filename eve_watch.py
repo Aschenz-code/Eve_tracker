@@ -3027,9 +3027,10 @@ def cmd_events(args):
     pcount = tk.Label(ptop, text="", font=("Segoe UI", 9), fg="#666")
     pcount.pack(side="left", padx=(12, 0))
 
-    pcols = ("name", "ships", "corporations", "seen", "first", "last", "on")
+    pcols = ("name", "ships", "corporations", "seen", "last", "in/out",
+             "docked", "last seen by")
     ptree = ttk.Treeview(tab_pl, columns=pcols, show="headings", height=24)
-    for c, w in zip(pcols, (170, 300, 190, 55, 135, 135, 120)):
+    for c, w in zip(pcols, (160, 250, 110, 50, 130, 60, 150, 110)):
         ptree.heading(c, text=c)
         ptree.column(c, width=w, anchor="w")
     psb = ttk.Scrollbar(tab_pl, orient="vertical", command=ptree.yview)
@@ -3074,14 +3075,24 @@ def cmd_events(args):
             corps = list(who.get("corps", {}))
             ship_s = listed(who.get("ships", {}))
             corp_s = listed(who.get("corps", {}), counts=False)
-            blob = f"{who.get('name','')} {ship_s} {corp_s}".lower()
+            blob = (f"{who.get('name','')} {ship_s} {corp_s} "
+                    f"{who.get('last_by','')} {who.get('last_note','')}").lower()
             if need and need not in blob:
                 continue
+            dirn = {"in": "in", "out": "out"}.get(who.get("last_dir"), "")
+            dock = who.get("last_note", "")
+            tally = []
+            if who.get("docked"):
+                tally.append(f"{who['docked']}d")
+            if who.get("undocked"):
+                tally.append(f"{who['undocked']}u")
+            if tally:
+                dock = f"{dock}  ({'/'.join(tally)})" if dock else "/".join(tally)
             ptree.insert("", "end", values=(
                 who.get("name", ""), ship_s, corp_s, who.get("seen", 0),
-                who.get("first_seen", "")[:16].replace("T", " "),
                 who.get("last_seen", "")[:16].replace("T", " "),
-                ", ".join(who.get("clients", []))))
+                dirn, dock,
+                who.get("last_by") or ", ".join(who.get("clients", []))))
             shown += 1
         pcount.configure(text=f"{shown} of {len(book)} pilot(s)")
 
@@ -4025,10 +4036,66 @@ def cmd_watch(args):
             raise_alarm(phrase or st["say"], f"{name}: {detail}\n\n{shot}", args)
 
     book, book_dirty, book_saved = load_pilots(), False, time.time()
+    # Overview comings and goings, and structure counts that have not been
+    # explained yet. The counter can fire up to five seconds EITHER side of the
+    # overview event - measured across 16 changes, all within 5s - so both
+    # sides have to be able to complete the pair.
+    moves, pending_counts = [], []
+    DOCK_WINDOW = 20.0
     try:
         book_stamp = os.path.getmtime(PILOTS)
     except OSError:
         book_stamp = None
+
+    def note_move(key, direction):
+        """One pilot appearing on or leaving an overview."""
+        nonlocal book_dirty
+        who = book.get(key)
+        if who is not None:
+            who["last_dir"] = direction
+            who["last_by"] = TAG
+            book_dirty = True
+        moves.append((time.time(), key, direction))
+        del moves[:-40]
+        settle_counts()
+
+    def settle_counts():
+        """Pair a structure count change with the overview event that explains it.
+
+        A count going up while someone leaves the overview is that person
+        docking; going down as someone appears is them undocking. Measured
+        against 16 real changes, every one matched the expected direction
+        inside five seconds. It stays an inference - the count moves for people
+        who were never on your overview too - so it is logged as one.
+        """
+        nonlocal book_dirty
+        now = time.time()
+        del pending_counts[:max(0, len(pending_counts) - 8)]
+        for entry in list(pending_counts):
+            at, up = entry
+            if now - at > DOCK_WINDOW:
+                pending_counts.remove(entry)
+                continue
+            want = "out" if up else "in"
+            hit = None
+            for m_at, key, direction in reversed(moves):
+                if direction == want and abs(m_at - at) <= DOCK_WINDOW:
+                    hit = (m_at, key)
+                    break
+            if not hit:
+                continue
+            pending_counts.remove(entry)
+            _, key = hit
+            who = book.get(key)
+            name = who["name"] if who else key
+            verb = "docked" if up else "undocked"
+            if who is not None:
+                who[verb] = who.get(verb, 0) + 1
+                who["last_note"] = f"{verb} {dt.datetime.now():%H:%M:%S}"
+                book_dirty = True
+            log(f"** {name} {verb} (structure count {'up' if up else 'down'} "
+                f"within {abs(hit[0] - at):.0f}s of the overview change)")
+            record_event(started, "structure", verb, name, obs_dir=obs_dir)
 
     def record_pilots(st, frame, box, s):
         """Fold every visible overview row into the pilot book.
@@ -4086,6 +4153,10 @@ def cmd_watch(args):
             if note_pilot(book, who, ship, f.get("corporation"), TAG,
                           visit=key not in st["pilots_seen"]):
                 book_dirty = True
+        for key in here - st["pilots_seen"]:
+            note_move(key, "in")
+        for key in st["pilots_seen"] - here:
+            note_move(key, "out")
         if here != st["pilots_seen"]:
             book_dirty = True
         st["pilots_seen"] = here
@@ -4350,6 +4421,13 @@ def cmd_watch(args):
                         detail = f"{was if was is not None else '?'} -> {shown}"
                         phrase = (f"{st['say']}. now {shown}"
                                   if now_val is not None else st["say"])
+                        try:
+                            if int(now_val) != int(was):
+                                pending_counts.append(
+                                    (time.time(), int(now_val) > int(was)))
+                                settle_counts()
+                        except (TypeError, ValueError):
+                            pass         # a count that reads "?" explains nothing
                     fire(name, st, box, frame, "change", detail, phrase,
                          alarm=st["alert"])
                     st["ref"], st["cand"], st["count"] = st["cand"], None, 0
