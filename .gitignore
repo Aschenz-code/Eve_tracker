@@ -28,3 +28,4 @@ __pycache__/
 ~$*
 config.json.tmp
 config.json.prev
+CLIPBOARD_OWNER

@@ -67,6 +67,7 @@ BASE_SHOTS = os.path.join(SHOTS, "baseline")    # diagnostics: what it sees at s
 LOGFILE = os.path.join(HERE, "events.log")
 CSVFILE = os.path.join(HERE, "events.csv")
 PAUSEFILE = os.path.join(HERE, "PAUSED")   # exists = the running watcher idles
+CLIPFILE  = os.path.join(HERE, "CLIPBOARD_OWNER")  # which watcher reads Ctrl+C
 VALUES = os.path.join(HERE, "values")      # learned glyph masks, per region+value
 MODEFILE = os.path.join(HERE, "MODE")      # alert profile, switchable while running
 CLIENTSFILE = os.path.join(HERE, "CLIENTS")   # which clients the supervisor runs
@@ -736,6 +737,24 @@ def label_by_row(frame, box, scale, pitch):
     return label
 
 
+def reportable(label, settings, require=None):
+    """Whether a detected row is worth telling the user about.
+
+    Pixel identity is deliberately independent of OCR, because OCR wobbles on
+    unchanged text. But a row the box picked up from OUTSIDE the list - EVE's
+    "Probes launched." notification sitting below a short signature list - is a
+    real row of real pixels, so pixels alone cannot rule it out. Where a list
+    has a known row shape the label is the only thing that can: 58% of logged
+    signature rows were text like "s launched." or "(unreadable)" that no
+    signature id could ever match.
+    """
+    if ignored(label, settings):
+        return False
+    if require is not None and not require.match(row_key(label)):
+        return False
+    return True
+
+
 def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
                      allow_depart=True):
     """Identify list rows by pixel bitmap rather than by OCR'd text.
@@ -793,7 +812,9 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
                 continue
             st["rows"][k]["misses"] += 1
             if st["rows"][k]["misses"] >= need:
-                departed.append(st["rows"].pop(k)["text"])
+                text = st["rows"].pop(k)["text"]
+                if reportable(text, settings, st.get("require")):
+                    departed.append(text)
 
     arrived, still = [], []
     for search, exact, cell in fresh:
@@ -809,9 +830,11 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
             st["rows"][f"px{st['next_id']}"] = {"bitmap": exact, "text": label,
                                                 "misses": 0}
             # Track it either way so it is not re-reported, but stay silent for
-            # permanent scenery the ignore list already rules out.
-            if not ignored(label, settings):
+            # permanent scenery and for rows that cannot be what this list holds.
+            if reportable(label, settings, st.get("require")):
                 arrived.append(label)
+            else:
+                st["junk"] = st.get("junk", 0) + 1
         else:
             still.append((exact, label, hits))
     st["pending"] = still
@@ -861,6 +884,41 @@ def read_clipboard():
             k.GlobalUnlock(h)
     finally:
         user32.CloseClipboard()
+
+
+def clipboard_owner(stale=20.0):
+    """Whether THIS watcher is the one that reads the clipboard.
+
+    Ctrl+C is a single global buffer. Every watcher polling it means one
+    keypress produces one alert per client - and each alert names its own
+    client as the source, which the clipboard cannot actually tell you, since
+    an EVE paste carries no character or system name.
+
+    So exactly one watcher reads it. Ownership is a file holding a pid, with
+    the holder refreshing its mtime; any watcher takes over once it goes stale,
+    so ownership survives the owner being stopped or crashing.
+    """
+    me = os.getpid()
+    try:
+        with open(CLIPFILE, "r", encoding="utf-8") as fh:
+            holder = int(fh.read().strip() or 0)
+        age = time.time() - os.path.getmtime(CLIPFILE)
+    except (OSError, ValueError):
+        holder, age = 0, stale + 1
+
+    if holder != me and age <= stale:
+        return False
+    if holder == me and age < stale / 4:
+        return True                     # still ours, no need to touch the file
+    try:
+        with open(CLIPFILE, "w", encoding="utf-8") as fh:
+            fh.write(str(me))
+        if holder != me:
+            log(f"   clipboard: this watcher now owns Ctrl+C reads "
+                f"(previous owner {holder or 'none'} is gone)")
+        return True
+    except OSError:
+        return False
 
 
 def parse_signatures(text):
@@ -1205,14 +1263,14 @@ def post_webhook(url, text):
         log(f"  webhook failed: {exc}")
 
 
-def raise_alarm(phrase, body, opts):
+def raise_alarm(phrase, body, opts, attribute=True):
     """Beep instantly, then nag by voice until the popup is acknowledged.
 
     With several clients watched at once the first thing you need to know is
     WHICH one to switch to, so the client leads both the spoken alert and the
     popup rather than being buried in the log.
     """
-    if TAG:
+    if TAG and attribute:
         phrase = f"{TAG}. {phrase}"
         body = f"Client: {TAG}\n\n{body}"
     title = f"EVE watch - {TAG}" if TAG else "EVE watch"
@@ -1783,6 +1841,12 @@ def cmd_calibrate(args):
             "target": {"left": geo["box_left"], "top": top,
                        "width": max(60, geo["box_right"] - geo["box_left"]),
                        "height": max(2 * geo["pitch"], geo["box_bottom"] - top)},
+            # Signature ids are the one list with a fixed row shape, so a label
+            # that cannot be one is not a row of this list. Lower-case because
+            # row_key case-folds.
+            **({"require": r"^[a-z]{3}-\d{3}"}
+               if spec["mode"] == "roster" and p["label"].startswith("sigs")
+               else {}),
             "anchor": anchor, "key_width": geo["key_width"],
             "max_drift": drift, "ignore": list(spec["ignore"]),
             "zoom": True, "alert": spec["mode"] != "dscan",
@@ -3803,7 +3867,7 @@ def cmd_watch(args):
                     log(f"   {r['name']}: reloaded taught values "
                         f"{sorted(st['learned'])} - no restart needed")
 
-            if s["clipboard_sigs"]:
+            if s["clipboard_sigs"] and clipboard_owner():
                 seq = user32.GetClipboardSequenceNumber()
                 if seq != clip_seq:
                     clip_seq = seq
@@ -3820,6 +3884,19 @@ def cmd_watch(args):
                                          f"{len(sigs)}: " + ", ".join(sorted(sigs)),
                                          obs_dir=obs_dir)
                             continue
+                        # A paste carries no system name, so jumping looks exactly
+                        # like every signature in one system changing at once.
+                        # Sharing not one id with what we knew means you moved:
+                        # adopt the new list quietly rather than alarm on all of it.
+                        if not (set(sigs) & set(known_sigs)):
+                            known_sigs = sigs
+                            log(f"   clipboard: {len(sigs)} signature(s) from a "
+                                f"different system - re-baselined, no alarm")
+                            record_event(started, "clipboard", "sigs_system",
+                                         f"{len(sigs)}: " + ", ".join(sorted(sigs)),
+                                         obs_dir=obs_dir)
+                            continue
+
                         fresh = {k: v for k, v in sigs.items() if k not in known_sigs}
                         gone = [k for k in known_sigs if k not in sigs]
                         known_sigs = sigs
@@ -3836,7 +3913,7 @@ def cmd_watch(args):
                             raise_alarm(
                                 f"{len(fresh)} new signature"
                                 f"{'s' if len(fresh) > 1 else ''}",
-                                f"New signature(s):\n\n{detail}", args)
+                                f"New signature(s):\n\n{detail}", args, attribute=False)
                         if gone:
                             record_event(started, "clipboard", "sig_gone",
                                          ", ".join(sorted(gone)), obs_dir=obs_dir)
