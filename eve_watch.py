@@ -955,9 +955,15 @@ def field_samples(frame, box, scale, columns, pads=(0, 4, 12)):
     glyphs, it does not invent them, so between "Prospect" and "os ect" the
     longer one is the one that survived intact. Returns {slot_y: {column: text}}.
     """
+    # Some columns sit LEFT of the box: it starts at the name column, so
+    # distance is at a negative offset and was never in the crop. Reach out far
+    # enough to include every column the header gave us - it is all the same
+    # panel, so nothing else can be pulled in.
+    reach = max(0, -min(columns.values())) + 8 if columns else 0
+
     out = {}
     for pad in pads:
-        left = max(0, box["left"] - pad)
+        left = max(0, box["left"] - pad - reach)
         top = max(0, box["top"] - pad)
         dx, dy = box["left"] - left, box["top"] - top
         crop_box = {"left": left, "top": top,
@@ -981,6 +987,28 @@ def field_samples(frame, box, scale, columns, pads=(0, 4, 12)):
                 if (len(value), -value.count(" ")) > (len(have), -have.count(" ")):
                     out[slot][key] = value
     return out
+
+
+_DIST = re.compile(r"^([0-9][0-9 .,]*)[ ]*(m|km|au)$", re.I)
+_AU_M = 149_597_870_700.0
+
+
+def parse_distance(text):
+    """An overview distance in metres, or None.
+
+    EVE writes "1 933 km", "27,9 AU", "350 m" - space as the thousands mark and
+    comma as the decimal, which is the opposite of what float() expects.
+    """
+    hit = _DIST.match(" ".join((text or "").split()))
+    if not hit:
+        return None
+    number = hit.group(1).replace(" ", "").replace(".", "").replace(",", ".")
+    try:
+        value = float(number)
+    except ValueError:
+        return None
+    unit = hit.group(2).lower()
+    return value * (1000.0 if unit == "km" else _AU_M if unit == "au" else 1.0)
 
 
 def reportable(label, settings, require=None):
@@ -3930,6 +3958,8 @@ def cmd_watch(args):
               "columns": r.get("columns") or None,
               "pilots_seen": set(),
               "pilot_reads": {},
+              "last_dist": {},
+              "hole_dist": None,
               "pix_ncc": r.get("pix_ncc", 0.90),
               "pix_min_lit": r.get("pix_min_lit", 20),
               "row_offset": r.get("row_offset", 0),
@@ -4047,14 +4077,44 @@ def cmd_watch(args):
     except OSError:
         book_stamp = None
 
-    def note_move(key, direction):
+    def note_move(key, direction, track=None, hole_at=None):
         """One pilot appearing on or leaving an overview."""
         nonlocal book_dirty
         who = book.get(key)
+        name = who["name"] if who else key
         if who is not None:
             who["last_dir"] = direction
             who["last_by"] = TAG
             book_dirty = True
+
+        # Taking a wormhole looks the same as any other disappearance, except
+        # for WHERE it happened: you must be within 5km of a hole to activate
+        # it. So compare the last distance seen against the hole's own distance
+        # rather than against zero - this client sits 1900km off the hole, and
+        # a ship on it reads the same distance the hole does.
+        was_at = track[-1] if track else None
+        # Warping off the hole also ends with the last sample showing them ON
+        # it, because they are gone before the next read. A ship that was
+        # already opening the range was leaving under its own power; one that
+        # sat still and vanished took the hole.
+        leaving = (len(track or []) >= 2
+                   and track[-1] - track[-2] > 5_000)
+        if (direction == "out" and was_at is not None and hole_at is not None
+                and abs(was_at - hole_at) <= 10_000 and not leaving):
+            if who is not None:
+                who["jumps"] = who.get("jumps", 0) + 1
+                who["last_note"] = f"took the hole {dt.datetime.now():%H:%M:%S}"
+                book_dirty = True
+            log(f"** {name} TOOK THE WORMHOLE - vanished {abs(was_at - hole_at)/1000:.1f}km "
+                f"from it, last seen at {was_at/1000:.0f}km")
+            record_event(started, "overview", "hole", name, obs_dir=obs_dir)
+            raise_alarm(f"someone took the wormhole. {name}",
+                        f"{name} vanished on the wormhole "
+                        f"({abs(was_at - hole_at)/1000:.1f} km from it)", args)
+        elif direction == "out" and was_at is not None:
+            why = " while opening range" if leaving else ""
+            log(f"   {name} left at {was_at/1000:.0f}km{why}"
+                + (f" (hole is at {hole_at/1000:.0f}km)" if hole_at else ""))
         moves.append((time.time(), key, direction))
         del moves[:-40]
         settle_counts()
@@ -4133,6 +4193,10 @@ def cmd_watch(args):
             who = clean_field(f.get("name"))
             ship = clean_field(f.get("type"))
             if not looks_like_pilot(who, ship):
+                # Not a pilot - but a wormhole in the list is the thing every
+                # departure is measured against, so note where it is.
+                if ship and who.casefold() == ship.casefold()                         and who.casefold().startswith("wormhole"):
+                    st["hole_dist"] = parse_distance(f.get("distance"))
                 continue
 
             # One OCR pass is not evidence. The same pixels of one row read as
@@ -4147,6 +4211,11 @@ def cmd_watch(args):
 
             key = pilot_key(who)
             here.add(key)
+            far = parse_distance(f.get("distance"))
+            if far is not None:
+                seen_at = st["last_dist"].setdefault(key, [])
+                seen_at.append(far)
+                del seen_at[:-3]        # only the last few matter
             # A visit, not a poll: the roster is re-read every few seconds, so
             # counting every pass measured how long the client was open rather
             # than how often this pilot was actually seen.
@@ -4156,7 +4225,8 @@ def cmd_watch(args):
         for key in here - st["pilots_seen"]:
             note_move(key, "in")
         for key in st["pilots_seen"] - here:
-            note_move(key, "out")
+            note_move(key, "out", track=st["last_dist"].get(key),
+                      hole_at=st["hole_dist"])
         if here != st["pilots_seen"]:
             book_dirty = True
         st["pilots_seen"] = here

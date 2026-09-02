@@ -59,6 +59,22 @@ Alert profiles:
 Alerts lead with the client name — *"Scout. new contact in the overview. \<pilot\>
 \<ship\>"* — so you know which window to open.
 
+## Taking a wormhole
+
+An overview holding a wormhole gets one more inference. Jumping looks like any
+other disappearance, except for *where* it happened: you must be within 5 km of
+a hole to activate it. So a pilot who vanishes at the same distance the hole
+itself reads is announced as having taken it - which works whatever the watching
+client sits at, since a ship on the hole reads the hole's own distance.
+
+Nothing about this depends on graphics settings, unlike the flash the game draws
+when a hole fires.
+
+Two things it cannot tell apart from a jump: cloaking up while sitting on the
+hole, and warping off in the moment between two reads. The second is guarded -
+a ship already opening the range is reported as leaving, not jumping - but the
+first is indistinguishable from the outside.
+
 ## Docking
 
 If a client watches both an overview and the structure counter, the two are
