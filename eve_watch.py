@@ -847,6 +847,31 @@ def clean_ticker(text):
     return ""
 
 
+# EVE's overview right-click menu is a fixed vocabulary, and it is painted
+# straight over the list. The row grid keeps almost all of it out; this catches
+# an item that happens to land on a slot with a plausible-looking second column
+# ("Remove Frigate from" / "Overview").
+MENU_WORDS = ("show info", "look at", "track", "approach", "orbit",
+              "keep at range", "align to", "warp to", "dock", "jump through",
+              "add to watch", "remove ", "bookmark", "pilot ", "corporation ",
+              "alliance ", "set destination", "lock target", "open cargo")
+
+# Character names are letters, digits, spaces, hyphens and apostrophes. Nothing
+# else. A parenthesis or a stray glyph means it is not a name.
+NAME_OK = re.compile(r"^[0-9A-Za-z' -]+$")
+
+
+def looks_like_pilot(name, ship):
+    if len(name) < 3 or len(ship) < 3:
+        return False                    # no ship, nothing worth recording
+    if not NAME_OK.match(name):
+        return False
+    low = name.casefold()
+    if any(low.startswith(w) for w in MENU_WORDS):
+        return False
+    return name.casefold() != ship.casefold()   # wormholes, belts, beacons
+
+
 def pilot_key(name):
     return clean_field(name).casefold()
 
@@ -2968,12 +2993,22 @@ def cmd_events(args):
         for who in rows:
             # most-flown ship first: what someone usually undocks in is the
             # useful fact, not whatever they happened to be in last
-            ships = sorted(who.get("ships", {}).items(),
-                           key=lambda kv: -kv[1].get("count", 0))
-            corps = sorted(who.get("corps", {}).items(),
-                           key=lambda kv: -kv[1].get("count", 0))
-            ship_s = ", ".join(k for k, _ in ships)
-            corp_s = ", ".join(k for k, _ in corps)
+            def solid(book_field):
+                """Corroborated readings first, one-off misreads hidden.
+
+                A hull read once beside one read fifteen times is OCR, not a
+                second ship. The store keeps both - it is a record - but the
+                table would be unreadable if every wobble showed as a ship.
+                """
+                items = sorted(book_field.items(),
+                               key=lambda kv: -kv[1].get("count", 0))
+                good = [k for k, v in items if v.get("count", 0) >= 2]
+                return good or [k for k, _ in items[:1]]
+
+            ships = solid(who.get("ships", {}))
+            corps = solid(who.get("corps", {}))
+            ship_s = ", ".join(ships)
+            corp_s = ", ".join(corps)
             blob = f"{who.get('name','')} {ship_s} {corp_s}".lower()
             if need and need not in blob:
                 continue
@@ -3914,6 +3949,10 @@ def cmd_watch(args):
             raise_alarm(phrase or st["say"], f"{name}: {detail}\n\n{shot}", args)
 
     book, book_dirty, book_saved = load_pilots(), False, time.time()
+    try:
+        book_stamp = os.path.getmtime(PILOTS)
+    except OSError:
+        book_stamp = None
 
     def record_pilots(st, frame, box, s):
         """Fold every visible overview row into the pilot book.
@@ -3925,26 +3964,41 @@ def cmd_watch(args):
         nonlocal book_dirty
         rows = ocr_rows(to_image(crop(frame, box)), s["ocr_scale"])
         here = set()
+
+        # Only text sitting in an occupied row slot counts. Reading every line
+        # in the box instead put a right-click menu into the book as eight
+        # pilots - "Show Info", "Orbit (1 000 m)", "Remove Frigate from" - all
+        # real text, none of it a row of the list. The grid is what separates
+        # the list from whatever EVE paints on top of it.
+        slots = []
+        for cell in row_cells(box, st["pitch"], st["row_h"],
+                              st["key_width"] or box["width"],
+                              st["row_offset"]):
+            patch = crop(frame, cell)
+            if patch.shape[0] < cell["height"] or patch.shape[1] < cell["width"]:
+                continue
+            if int(text_mask(patch, thr).sum()) < st["pix_min_lit"]:
+                continue
+            slots.append(cell["top"] - box["top"] + cell["height"] / 2)
+
         for row in rows:
+            if not any(abs(row["y"] - c) <= max(3, st["pitch"] / 4)
+                       for c in slots):
+                continue
             if ignored(row["text"], st["cfg"]) or is_noise_row(row["text"]):
                 continue
             f = split_columns(row.get("words") or [], st["columns"], 0)
             who = clean_field(f.get("name"))
-            if len(who) < 3:
+            ship = clean_field(f.get("type"))
+            if not looks_like_pilot(who, ship):
                 continue
-            # A wormhole shows the same text as its own name and type -
-            # "Wormhole H296 Wormhole H296" - and so do asteroid belts and
-            # beacons. A pilot never does: nobody is named after their ship.
-            # Keeps the book to actual characters without needing every
-            # environment type listed by hand.
-            if who.casefold() == clean_field(f.get("type")).casefold():
-                continue
+
             key = pilot_key(who)
             here.add(key)
             # A visit, not a poll: the roster is re-read every few seconds, so
             # counting every pass measured how long the client was open rather
             # than how often this pilot was actually seen.
-            if note_pilot(book, who, f.get("type"), f.get("corporation"), TAG,
+            if note_pilot(book, who, ship, f.get("corporation"), TAG,
                           visit=key not in st["pilots_seen"]):
                 book_dirty = True
         if here != st["pilots_seen"]:
@@ -4298,7 +4352,26 @@ def cmd_watch(args):
                     os.path.join(rec, dt.datetime.now().strftime("%Y%m%d_%H%M%S") + ".png"))
 
             if book_dirty and time.time() - book_saved > 20:
+                # Someone editing the file while a watcher runs would otherwise
+                # lose the edit: the in-memory copy is flushed straight back
+                # over it. That is exactly how a pruned entry reappeared.
+                try:
+                    disk = os.path.getmtime(PILOTS)
+                except OSError:
+                    disk = None
+                if disk != book_stamp:
+                    log("   pilots.json changed on disk - reloading before save")
+                    fresh = load_pilots()
+                    for key, who in book.items():
+                        if key not in fresh:
+                            continue        # dropped outside; leave it dropped
+                        fresh[key] = who
+                    book = fresh
                 save_pilots(book)
+                try:
+                    book_stamp = os.path.getmtime(PILOTS)
+                except OSError:
+                    book_stamp = None
                 book_dirty, book_saved = False, time.time()
 
             if time.time() >= next_beat:
