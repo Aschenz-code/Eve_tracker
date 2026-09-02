@@ -3085,9 +3085,9 @@ def cmd_events(args):
     pcount.pack(side="left", padx=(12, 0))
 
     pcols = ("name", "in space now", "ships flown", "corporations", "seen",
-             "last", "docked", "last seen by")
+             "last", "status", "last seen by")
     ptree = ttk.Treeview(tab_pl, columns=pcols, show="headings", height=24)
-    for c, w in zip(pcols, (155, 150, 230, 100, 50, 125, 145, 105)):
+    for c, w in zip(pcols, (155, 145, 220, 95, 50, 120, 215, 100)):
         ptree.heading(c, text=c)
         ptree.column(c, width=w, anchor="w")
     ptree.tag_configure("here", foreground="#c22")
@@ -3154,13 +3154,6 @@ def cmd_events(args):
                         now_txt += f"  ({who['now_by']})"
             dirn = now_txt
             dock = who.get("last_note", "")
-            tally = []
-            if who.get("docked"):
-                tally.append(f"{who['docked']}d")
-            if who.get("undocked"):
-                tally.append(f"{who['undocked']}u")
-            if tally:
-                dock = f"{dock}  ({'/'.join(tally)})" if dock else "/".join(tally)
             ptree.insert("", "end", tags=(("here",) if dirn else ()), values=(
                 who.get("name", ""), dirn, ship_s, corp_s, who.get("seen", 0),
                 who.get("last_seen", "")[:16].replace("T", " "),
@@ -4222,7 +4215,6 @@ def cmd_watch(args):
             flying = ""
             if who is not None:
                 flying = who.get("now_ship") or who.get("last_ship") or ""
-                who[verb] = who.get(verb, 0) + 1
                 who["last_note"] = (f"{verb} {dt.datetime.now():%H:%M:%S}"
                                     + (f" in {flying}" if flying else ""))
                 book_dirty = True
