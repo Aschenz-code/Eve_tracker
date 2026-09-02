@@ -934,6 +934,13 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
     nmin = st["pix_ncc"]
 
     pad = st["pix_pad"]
+    # Search wide sideways, tight vertically. A row growing the list makes a
+    # scrollbar appear and nudges every column ~10px across; at a 3px search
+    # window that scored 0.2275 against itself, so every row "departed" and
+    # "arrived" in the same second - which is how a wormhole that had not moved
+    # kept announcing itself. Nothing sits beside a row to be confused with, so
+    # x can be generous; rows are one pitch apart, so y must not be.
+    pad_x = st["pix_pad_x"]
     clip = st["pix_clip"]
 
     # Filter the whole box ONCE, then cut cells out of the filtered image.
@@ -965,8 +972,8 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
         # correlation reads that as a different row (0.87 against a 0.95 bar).
         # Clipping to the text leaves only glyph pixels: the same row scores
         # 1.0000, a different one 0.35.
-        occupied.append((cut(cell["left"] - pad, cell["top"] - pad,
-                             cell["width"] + 2 * pad, cell["height"] + 2 * pad),
+        occupied.append((cut(cell["left"] - pad_x, cell["top"] - pad,
+                             cell["width"] + 2 * pad_x, cell["height"] + 2 * pad),
                          cut(cell["left"], cell["top"],
                              cell["width"], cell["height"]), cell))
 
@@ -3805,6 +3812,7 @@ def cmd_watch(args):
               "pix_min_lit": r.get("pix_min_lit", 20),
               "row_offset": r.get("row_offset", 0),
               "pix_pad": r.get("pix_pad", 3),
+              "pix_pad_x": r.get("pix_pad_x", 16),
               "pix_clip": r.get("pix_clip", s["threshold"]),
               "cfg": region_settings(r, s),
               "next_id": 0,
@@ -3923,6 +3931,13 @@ def cmd_watch(args):
             f = split_columns(row.get("words") or [], st["columns"], 0)
             who = clean_field(f.get("name"))
             if len(who) < 3:
+                continue
+            # A wormhole shows the same text as its own name and type -
+            # "Wormhole H296 Wormhole H296" - and so do asteroid belts and
+            # beacons. A pilot never does: nobody is named after their ship.
+            # Keeps the book to actual characters without needing every
+            # environment type listed by hand.
+            if who.casefold() == clean_field(f.get("type")).casefold():
                 continue
             key = pilot_key(who)
             here.add(key)
