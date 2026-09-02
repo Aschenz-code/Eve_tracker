@@ -68,6 +68,29 @@ LOGFILE = os.path.join(HERE, "events.log")
 CSVFILE = os.path.join(HERE, "events.csv")
 PAUSEFILE = os.path.join(HERE, "PAUSED")   # exists = the running watcher idles
 CLIPFILE  = os.path.join(HERE, "CLIPBOARD_OWNER")  # which watcher reads Ctrl+C
+
+
+def pause_path(client=None):
+    """The file whose presence pauses alerting - globally, or for one client.
+
+    Probing on a scout changes that client's own signature list, so its alerts
+    are self-inflicted noise while you work. Unticking it does silence them,
+    but that tears the watcher down and stands a new one up; a pause keeps the
+    process, re-baselines on resume, and leaves every other client alerting.
+    """
+    if not client:
+        return PAUSEFILE
+    return os.path.join(HERE, f"PAUSED.{slug(short_client(client))}")
+
+
+def paused_for(client):
+    return os.path.exists(PAUSEFILE) or os.path.exists(pause_path(client))
+
+
+def paused_clients():
+    """Labels of clients paused on their own, ignoring any global pause."""
+    return sorted(f[len("PAUSED."):] for f in os.listdir(HERE)
+                  if f.startswith("PAUSED.") and len(f) > len("PAUSED."))
 VALUES = os.path.join(HERE, "values")      # learned glyph masks, per region+value
 MODEFILE = os.path.join(HERE, "MODE")      # alert profile, switchable while running
 CLIENTSFILE = os.path.join(HERE, "CLIENTS")   # which clients the supervisor runs
@@ -2321,6 +2344,8 @@ def collect_health(capture=True):
         "too few: check the supervisor. too many: orphans from a supervisor "
         "that died, or a second supervisor - alerts will repeat. Restarting "
         "the supervisor clears orphans.")
+    if paused_clients():
+        add(True, "paused on their own", ", ".join(paused_clients()))
     add(not os.path.exists(PAUSEFILE), "not paused",
         "PAUSED file present" if os.path.exists(PAUSEFILE) else "running",
         "run resume.bat")
@@ -3125,6 +3150,28 @@ def cmd_pick(args):
                       state=("normal" if title in live else "disabled"),
                       command=lambda t=title: add_panel_dialog(t)
                       ).grid(row=row, column=4, sticky="w", padx=(4, 0))
+
+            # Probing on a scout churns its own signature list, so its alerts
+            # are self-inflicted while you work. This silences that one client
+            # without stopping its watcher, and it re-baselines on resume.
+            pbtn = tk.Button(body, width=14)
+
+            def toggle_alerts(t=title, b=pbtn):
+                if os.path.exists(pause_path(t)):
+                    os.remove(pause_path(t))
+                else:
+                    with open(pause_path(t), "w", encoding="utf-8") as fh:
+                        fh.write(f"paused {dt.datetime.now():%Y-%m-%d %H:%M:%S}")
+                paint_alerts(t, b)
+
+            def paint_alerts(t=title, b=pbtn):
+                off = os.path.exists(pause_path(t))
+                b.configure(text=("Alerts OFF" if off else "Alerts on"),
+                            fg=("#b00" if off else "#060"))
+
+            pbtn.configure(command=toggle_alerts)
+            paint_alerts()
+            pbtn.grid(row=row, column=5, sticky="w", padx=(4, 0))
             row += 1
             for r in regions:
                 rv = tk.IntVar(value=1 if r.get("enabled", True) else 0)
@@ -3307,25 +3354,43 @@ def cmd_mode(args):
 
 
 def cmd_pause(args):
-    with open(PAUSEFILE, "w", encoding="utf-8") as fh:
+    who = getattr(args, "client", None)
+    with open(pause_path(who), "w", encoding="utf-8") as fh:
         fh.write(f"paused {dt.datetime.now():%Y-%m-%d %H:%M:%S}\n")
-    print("Paused. The watcher keeps running but will not alert.")
-    print("Resume with:  python eve_watch.py resume")
+    if who:
+        label = short_client(who)
+        print(f"Paused {label!r} only - every other client keeps alerting.")
+        print(f"Resume with:  python eve_watch.py resume --client {label!r}")
+    else:
+        print("Paused every client. The watchers keep running but will not alert.")
+        print("Resume with:  python eve_watch.py resume")
 
 
 def cmd_resume(args):
-    if os.path.exists(PAUSEFILE):
-        os.remove(PAUSEFILE)
-        print("Resumed. It re-baselines first, so nothing that happened while "
-              "paused will fire.")
+    who = getattr(args, "client", None)
+    path = pause_path(who)
+    if os.path.exists(path):
+        os.remove(path)
+        label = f" {short_client(who)!r}" if who else ""
+        print(f"Resumed{label}. It re-baselines first, so nothing that happened "
+              f"while paused will fire.")
+        if who and os.path.exists(PAUSEFILE):
+            print("Note: every client is still paused globally - clear that "
+                  "with:  python eve_watch.py resume")
+    elif who:
+        print(f"{short_client(who)!r} was not paused on its own.")
     else:
         print("Not paused.")
+        if paused_clients():
+            print(f"Still paused on their own: {', '.join(paused_clients())}")
 
 
 def cmd_status(args):
     running = [p for p in _watcher_pids()]
     print(f"watcher process: {'running, pid ' + ', '.join(map(str, running)) if running else 'NOT running'}")
-    print(f"paused:          {'YES' if os.path.exists(PAUSEFILE) else 'no'}")
+    print(f"paused:          {'YES (all)' if os.path.exists(PAUSEFILE) else 'no'}")
+    if paused_clients():
+        print(f"paused on their own: {', '.join(paused_clients())}")
     if os.path.exists(LOGFILE):
         with open(LOGFILE, "r", encoding="utf-8") as fh:
             tail = fh.readlines()[-5:]
@@ -3619,10 +3684,14 @@ def cmd_watch(args):
 
     try:
         while True:
-            if os.path.exists(PAUSEFILE):
+            if paused_for(args.client or regions[0]["window"]):
                 if not paused:
                     paused = True
-                    log("|| PAUSED - resume with:  python eve_watch.py resume")
+                    mine = os.path.exists(pause_path(args.client
+                                                      or regions[0]["window"]))
+                    how = (f'resume --client "{TAG}"' if mine and TAG
+                           else "resume")
+                    log(f"|| PAUSED - resume with:  python eve_watch.py {how}")
                     record_event(started, "-", "pause", obs_dir=obs_dir)
                 time.sleep(min(2.0, max(0.5, interval)))
                 continue
@@ -4098,9 +4167,12 @@ def main():
     sp.set_defaults(func=cmd_mode)
 
     sp = sub.add_parser("pause", help="stop alerting without stopping the watcher")
+    sp.add_argument("--client", help="pause only this client, e.g. while you "
+                                     "probe on a scout (default: all)")
     sp.set_defaults(func=cmd_pause)
 
     sp = sub.add_parser("resume", help="start alerting again (re-baselines first)")
+    sp.add_argument("--client", help="resume only this client (default: all)")
     sp.set_defaults(func=cmd_resume)
 
     sp = sub.add_parser("status", help="is it running, is it paused, recent log")

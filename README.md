@@ -42,6 +42,7 @@ stops drawing column headers when there are no results — run a scan first.
 | watch events as they happen | **events.bat** |
 | check every part of the setup | **Check everything** in the hub, or **doctor.bat** |
 | stop alerting, keep watching | **pause.bat** / **resume.bat** (all clients) |
+| silence ONE client while you probe on it | **Alerts on / Alerts OFF** beside it in **pick.bat** |
 | change how loudly it alerts | **mode-active.bat** / **mode-away.bat** / **mode-silent.bat** |
 | check it is alive | **Status** in the hub (live) or **status.bat** (one-shot text) |
 | start watching after a reboot | **watch.bat** (single client) or `eve_watch.py supervise` |
@@ -107,6 +108,12 @@ Common causes:
   and it must not lock onto the wrong one. Re-calibrate.
 - **You switched overview tab and the columns differ.** Re-calibrate.
 - **The client restarted.** Handled automatically — it reconnects within 30 s.
+
+Probing on a scout changes that client's own signature list, so its alerts are
+self-inflicted while you work. Press **Alerts OFF** beside it in pick.bat rather
+than unticking it: the watcher stays up, every other client keeps alerting, and
+it re-baselines when you switch alerts back on, so nothing from the quiet window
+fires. From the command line that is `pause --client "Name"`.
 
 ## Running commands by hand
 
