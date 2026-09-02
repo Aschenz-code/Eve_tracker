@@ -4480,7 +4480,33 @@ def cmd_watch(args):
                     # A departure needs two passes to confirm, but the pixels only
                     # move ONCE when someone leaves - so a pixel-gated pass alone
                     # would strand it at one miss forever. Re-scan on a timer too.
-                    due = ((moved and st["count"] >= stable_needed)
+                    #
+                    # A row waiting on its second look must NOT wait out that
+                    # timer. Confirming took the full roster_period because the
+                    # row is static by then, so nothing moves to trigger the
+                    # follow-up: an arrival cost three passes to notice plus five
+                    # seconds to confirm, and a ship can warp off or dock inside
+                    # eight seconds. Come straight back while anything is
+                    # in flight - which is exactly when it is worth the OCR.
+                    waiting = bool(st.get("pending")) or any(
+                        v.get("misses") for v in st["rows"].values())
+                    need_stable = 2 if st["identity"] == "pixels" else stable_needed
+
+                    # A row appearing adds a row's worth of lit pixels. A number
+                    # ticking in a column does not, so this separates "someone
+                    # arrived" from "a velocity changed" for free - the mask is
+                    # already computed - and lets an arrival skip the settling
+                    # passes without OCR running every time a distance updates.
+                    # Five times the per-row floor: a measured row carries
+                    # 545-906 lit px, while digits appearing in a velocity
+                    # column carry well under a hundred. Getting it wrong costs
+                    # one extra OCR pass, never a wrong arrival - identity still
+                    # needs its two confirmations - so the margin is generous.
+                    grew = (int(cur.sum()) - int(st["ref"].sum())
+                            >= st["pix_min_lit"] * 5)
+                    due = ((moved and st["count"] >= need_stable)
+                           or grew
+                           or waiting
                            or now - st["last_ocr"] >= s["roster_period"])
                     if not due:
                         continue
@@ -4489,10 +4515,17 @@ def cmd_watch(args):
                     if st["identity"] == "pixels":
                         _label = label_by_row(frame, box, s["ocr_scale"],
                                               st["pitch"], st["label_width"])
-                        if st["columns"] and name.startswith("overview"):
-                            record_pilots(st, frame, box, s)
                         arrived, departed = reconcile_pixels(
                             st, frame, box, thr, st["cfg"], _label)
+                        # Three OCR passes at 313ms, and on a quiet grid they
+                        # re-read text that has not changed. Run them when the
+                        # roster actually moved, and otherwise only often enough
+                        # to keep "in space now" fresh. Must come AFTER the
+                        # reconcile, which is what says whether it moved.
+                        if st["columns"] and name.startswith("overview"):
+                            if arrived or departed or now - st.get("pilots_at", 0) >= 25:
+                                st["pilots_at"] = now
+                                record_pilots(st, frame, box, s)
                         for gone in departed:
                             log(f"   {name}: left - {gone}")
                             record_event(started, name, "depart", gone,
