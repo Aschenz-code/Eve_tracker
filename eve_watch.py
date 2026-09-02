@@ -2993,22 +2993,22 @@ def cmd_events(args):
         for who in rows:
             # most-flown ship first: what someone usually undocks in is the
             # useful fact, not whatever they happened to be in last
-            def solid(book_field):
-                """Corroborated readings first, one-off misreads hidden.
+            def listed(book_field):
+                """Every reading, most-seen first, with how often it was seen.
 
-                A hull read once beside one read fifteen times is OCR, not a
-                second ship. The store keeps both - it is a record - but the
-                table would be unreadable if every wobble showed as a ship.
+                Hiding one-off readings to suppress OCR wobble also hid the
+                single most interesting thing in the book - a pilot who turned
+                up once in a Naglfar rather than the Astero it flies daily.
+                The count says which readings to trust; nothing is concealed.
                 """
                 items = sorted(book_field.items(),
-                               key=lambda kv: -kv[1].get("count", 0))
-                good = [k for k, v in items if v.get("count", 0) >= 2]
-                return good or [k for k, _ in items[:1]]
+                               key=lambda kv: (-kv[1].get("count", 0), kv[0]))
+                return ", ".join(f"{k} x{v.get('count', 0)}" for k, v in items)
 
-            ships = solid(who.get("ships", {}))
-            corps = solid(who.get("corps", {}))
-            ship_s = ", ".join(ships)
-            corp_s = ", ".join(corps)
+            ships = list(who.get("ships", {}))
+            corps = list(who.get("corps", {}))
+            ship_s = listed(who.get("ships", {}))
+            corp_s = listed(who.get("corps", {}))
             blob = f"{who.get('name','')} {ship_s} {corp_s}".lower()
             if need and need not in blob:
                 continue
