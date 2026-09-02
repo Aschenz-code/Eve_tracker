@@ -587,8 +587,9 @@ def ocr_rows(pil, scale=3, key_width=None):
         # EVE fills a new row in left-to-right, so corp/alliance can land a beat
         # after the name - keying on the whole line double-reports one arrival.
         kept = [t for x, t in r if key_width is None or x / scale <= key_width]
-        out.append({"text": text,
-                    "key": row_key(normalise_glyphs(" ".join(kept))),
+        kept_text = normalise_glyphs(" ".join(kept))
+        out.append({"text": text, "kept": kept_text,
+                    "key": row_key(kept_text),
                     "y": row_y[len(out)]})
     return out
 
@@ -716,22 +717,23 @@ def row_cells(box, pitch, height, width, offset=0):
         i += 1
 
 
-def label_by_row(frame, box, scale, pitch):
+def label_by_row(frame, box, scale, pitch, label_width=None):
     """Label rows from ONE whole-box OCR pass, matched by vertical centre.
 
     OCR of a single 18px row strip drops the leading id column - it needs the
     surrounding lines for context - so read the whole list once and map each
     row back to its slot instead.
     """
-    rows = ocr_rows(to_image(crop(frame, box)), scale)
+    rows = ocr_rows(to_image(crop(frame, box)), scale, label_width)
 
     def label(cell):
         want = cell["top"] - box["top"] + cell["height"] / 2
         best, gap = None, None
+        field = "kept" if label_width is not None else "text"
         for r in rows:
             d = abs(r["y"] - want)
             if gap is None or d < gap:
-                best, gap = r["text"], d
+                best, gap = r[field] or r["text"], d
         return best if best is not None and gap <= pitch else "(unreadable)"
 
     return label
@@ -1398,6 +1400,9 @@ PANELS = [
     {"kind": "sigs", "title": ["probe", "scanner"], "mode": "roster",
      "headers": ["distance", "id", "name", "group", "signal"],
      "id_upto": "name", "id_from": "id",
+     # Signal strength counts up while probes resolve, so it churns every label
+     # it appears in - and it says nothing about WHICH signature the row is.
+     "label_upto": "signal",
      "say": "new signature on the probe scanner",
      # the panel footer sits below the list and would otherwise be tracked as a row
      "ignore": ["launched", "No Results"]},
@@ -1627,6 +1632,12 @@ def panel_geometry(panel, words, bounds, frame=None, threshold=110):
     if key_width is not None and key_width < 20:
         key_width = None
 
+    label_width = None
+    if spec.get("label_upto") and spec["label_upto"] in header:
+        label_width = header[spec["label_upto"]]["x"] - box_left - 4
+    if label_width is not None and label_width < 20:
+        label_width = None
+
     text_h = round(statistics.median([w["h"] for w in header.values()]))
     # Prefer pixel-measured spacing; OCR word jitter makes the gaps unreliable.
     if frame is not None:
@@ -1665,6 +1676,7 @@ def panel_geometry(panel, words, bounds, frame=None, threshold=110):
             "text_h": text_h, "borrowable": borrowable,
             "measured_pitch": measured, "box_left": box_left,
             "box_right": min(x_hi, right_edge + 6), "key_width": key_width,
+            "label_width": label_width,
             "columns": {k: v["x"] for k, v in header.items()}}
 
 
@@ -1743,6 +1755,7 @@ def cmd_add_panel(args):
                    "width": max(60, geo["box_right"] - geo["box_left"]),
                    "height": max(2 * geo["pitch"], geo["box_bottom"] - top)},
         "anchor": anchor, "key_width": geo["key_width"], "max_drift": 200,
+        "label_width": geo.get("label_width"),
         "ignore": list(spec["ignore"]), "zoom": True,
         "alert": spec["mode"] != "dscan", "text_h": geo.get("text_h"),
         "say": spec["say"].format(label=name),
@@ -1864,6 +1877,7 @@ def cmd_calibrate(args):
                if spec["mode"] == "roster" and p["label"].startswith("sigs")
                else {}),
             "anchor": anchor, "key_width": geo["key_width"],
+            "label_width": geo.get("label_width"),
             "max_drift": drift, "ignore": list(spec["ignore"]),
             "zoom": True, "alert": spec["mode"] != "dscan",
             "say": spec["say"].format(label=p["label"]),
@@ -3498,6 +3512,7 @@ def cmd_watch(args):
               "pitch": r.get("row_pitch", 20),
               "row_h": r.get("row_height", r.get("row_pitch", 20) - 2),
               "key_width": r.get("key_width"),
+              "label_width": r.get("label_width"),
               "pix_ncc": r.get("pix_ncc", 0.90),
               "pix_min_lit": r.get("pix_min_lit", 20),
               "row_offset": r.get("row_offset", 0),
@@ -3774,7 +3789,7 @@ def cmd_watch(args):
 
                     if st["identity"] == "pixels":
                         _label = label_by_row(frame, box, s["ocr_scale"],
-                                              st["pitch"])
+                                              st["pitch"], st["label_width"])
                         arrived, departed = reconcile_pixels(
                             st, frame, box, thr, st["cfg"], _label)
                         for gone in departed:
