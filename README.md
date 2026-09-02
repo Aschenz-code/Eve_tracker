@@ -114,7 +114,9 @@ unknown. A running watcher picks up new values within seconds.
 - `pilots.json` — every name seen in an overview, with the ships they have
   flown, their corp tickers, when they were first and last seen, whether they
   were last coming or going, which client saw them last, and how often they
-  have docked or undocked. Browse it in the **Pilots** tab of events.bat. It needs column
+  have docked or undocked. The Pilots tab leads with **in space now** - the
+  hull anyone currently on an overview is sitting in, and which client can see
+  them - shown in red and blank for everyone else. Browse it in the **Pilots** tab of events.bat. It needs column
   positions, which calibrate reads off the overview header, so a client
   calibrated before this existed records nothing until re-calibrated once -
   doctor.bat says which.

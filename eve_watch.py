@@ -872,6 +872,26 @@ def looks_like_pilot(name, ship):
     return name.casefold() != ship.casefold()   # wormholes, belts, beacons
 
 
+def resolve_key(book, name):
+    """The key this name belongs under, folding OCR damage into one pilot.
+
+    Presence has to use the same answer the book does, or a pilot flickers:
+    "Redron" one pass and "edro" the next would look like one leaving and
+    another arriving.
+    """
+    key = pilot_key(name)
+    if key in book:
+        return key
+    inside = [k for k in book
+              if len(key) >= 4 and key in k or len(k) >= 4 and k in key]
+    if len(inside) == 1:
+        return inside[0]
+    near = fuzzy_match(key, list(book), 0.93)
+    if near and abs(len(near) - len(key)) <= 2:
+        return near
+    return key
+
+
 def pilot_key(name):
     return clean_field(name).casefold()
 
@@ -892,29 +912,12 @@ def note_pilot(book, name, ship, corp, client, when=None, visit=True):
     # split one pilot across those spellings. Cleaning the edges catches most of
     # it; a near-match catches the rest. The bar is high on purpose - a wrong
     # merge fuses two real pilots for good, which is worse than a duplicate.
-    if key not in book:
-        # OCR drops glyphs off the ends of a word, so a bad reading tends to be
-        # a piece of the good one: "Redron" came back as "edro". Containment
-        # catches that where a similarity score cannot - "edro" against
-        # "redron" scores 0.80, and no threshold that accepts it is safe for
-        # names in general.
-        inside = [k for k in book
-                  if len(key) >= 4 and key in k
-                  or len(k) >= 4 and k in key]
-        if len(inside) == 1:
-            hit = inside[0]
-            longer = hit if len(hit) >= len(key) else key
-            if longer != hit:           # the new spelling is the fuller one
-                book[longer] = book.pop(hit)
-                book[longer]["name"] = name
-            key = longer
-    if key not in book:
-        near = fuzzy_match(key, list(book), 0.93)
-        if near and abs(len(near) - len(key)) <= 2:
-            book[near].setdefault("aka", [])
-            if name not in book[near]["aka"] and name != book[near]["name"]:
-                book[near]["aka"].append(name)
-            key = near
+    hit = resolve_key(book, key)
+    if hit != key and hit in book:
+        book[hit].setdefault("aka", [])
+        if name not in book[hit]["aka"] and name != book[hit]["name"]:
+            book[hit]["aka"].append(name)
+    key = hit
 
     who = book.setdefault(key, {"name": name, "ships": {}, "corps": {},
                                 "clients": [], "seen": 0, "aka": [],
@@ -3055,12 +3058,13 @@ def cmd_events(args):
     pcount = tk.Label(ptop, text="", font=("Segoe UI", 9), fg="#666")
     pcount.pack(side="left", padx=(12, 0))
 
-    pcols = ("name", "ships", "corporations", "seen", "last", "in/out",
-             "docked", "last seen by")
+    pcols = ("name", "in space now", "ships flown", "corporations", "seen",
+             "last", "docked", "last seen by")
     ptree = ttk.Treeview(tab_pl, columns=pcols, show="headings", height=24)
-    for c, w in zip(pcols, (160, 250, 110, 50, 130, 60, 150, 110)):
+    for c, w in zip(pcols, (155, 150, 230, 100, 50, 125, 145, 105)):
         ptree.heading(c, text=c)
         ptree.column(c, width=w, anchor="w")
+    ptree.tag_configure("here", foreground="#c22")
     psb = ttk.Scrollbar(tab_pl, orient="vertical", command=ptree.yview)
     ptree.configure(yscrollcommand=psb.set)
     ptree.pack(side="left", fill="both", expand=True, pady=(8, 0))
@@ -3104,10 +3108,25 @@ def cmd_events(args):
             ship_s = listed(who.get("ships", {}))
             corp_s = listed(who.get("corps", {}), counts=False)
             blob = (f"{who.get('name','')} {ship_s} {corp_s} "
-                    f"{who.get('last_by','')} {who.get('last_note','')}").lower()
+                    f"{who.get('now_ship','')} {who.get('last_by','')} "
+                    f"{who.get('last_note','')}").lower()
             if need and need not in blob:
                 continue
-            dirn = {"in": "in", "out": "out"}.get(who.get("last_dir"), "")
+            # A sighting older than a couple of roster passes is not "now".
+            # Nothing writes a departure when a client is closed or crashes, so
+            # freshness has to come from the timestamp rather than a flag.
+            now_txt = ""
+            if who.get("now_ship") and who.get("now_at"):
+                try:
+                    age = (dt.datetime.now()
+                           - dt.datetime.fromisoformat(who["now_at"])).total_seconds()
+                except ValueError:
+                    age = 1e9
+                if age <= 90:
+                    now_txt = who["now_ship"]
+                    if who.get("now_by"):
+                        now_txt += f"  ({who['now_by']})"
+            dirn = now_txt
             dock = who.get("last_note", "")
             tally = []
             if who.get("docked"):
@@ -3116,10 +3135,10 @@ def cmd_events(args):
                 tally.append(f"{who['undocked']}u")
             if tally:
                 dock = f"{dock}  ({'/'.join(tally)})" if dock else "/".join(tally)
-            ptree.insert("", "end", values=(
-                who.get("name", ""), ship_s, corp_s, who.get("seen", 0),
+            ptree.insert("", "end", tags=(("here",) if dirn else ()), values=(
+                who.get("name", ""), dirn, ship_s, corp_s, who.get("seen", 0),
                 who.get("last_seen", "")[:16].replace("T", " "),
-                dirn, dock,
+                dock,
                 who.get("last_by") or ", ".join(who.get("clients", []))))
             shown += 1
         pcount.configure(text=f"{shown} of {len(book)} pilot(s)")
@@ -4085,6 +4104,10 @@ def cmd_watch(args):
         if who is not None:
             who["last_dir"] = direction
             who["last_by"] = TAG
+            if direction == "out":
+                who.pop("now_ship", None)
+                who.pop("now_at", None)
+                who.pop("now_by", None)
             book_dirty = True
 
         # Taking a wormhole looks the same as any other disappearance, except
@@ -4199,18 +4222,21 @@ def cmd_watch(args):
                     st["hole_dist"] = parse_distance(f.get("distance"))
                 continue
 
-            # One OCR pass is not evidence. The same pixels of one row read as
-            # "Redron Porpoise", "Redron Po Oise" and "edro o Oise" depending
-            # on nothing the tool controls - padding it more made it worse, not
-            # better - so a reading must repeat before it goes in the book. A
-            # wrong read varies; the right one keeps coming back the same.
-            token = (who, ship, clean_ticker(f.get("corporation")))
+            # Being on the overview and being worth recording are different
+            # questions. Presence must not wait for corroboration: the corp
+            # column is the flakiest of the three, and folding it into the
+            # confirmation made a pass that missed it look like the pilot had
+            # gone - a false departure, and now a false "took the wormhole".
+            key = resolve_key(book, who)
+            here.add(key)
+
+            # What gets WRITTEN still has to repeat. The same pixels read as
+            # "Porpoise", "Po Oise" and "os ect" depending on nothing the tool
+            # controls, so a hull must be seen twice before it is recorded.
+            token = (key, ship)
             st["pilot_reads"][token] = st["pilot_reads"].get(token, 0) + 1
             if st["pilot_reads"][token] < 2:
                 continue
-
-            key = pilot_key(who)
-            here.add(key)
             far = parse_distance(f.get("distance"))
             if far is not None:
                 seen_at = st["last_dist"].setdefault(key, [])
@@ -4221,6 +4247,16 @@ def cmd_watch(args):
             # than how often this pilot was actually seen.
             if note_pilot(book, who, ship, f.get("corporation"), TAG,
                           visit=key not in st["pilots_seen"]):
+                book_dirty = True
+            # What they are in NOW, as opposed to the tally of everything they
+            # have ever flown. Stamped every pass so a watcher that dies cannot
+            # leave someone looking like they are still on grid - the reader
+            # decides how fresh is fresh.
+            entry = book.get(key)
+            if entry is not None:
+                entry["now_ship"] = ship
+                entry["now_by"] = TAG
+                entry["now_at"] = dt.datetime.now().isoformat(timespec="seconds")
                 book_dirty = True
         for key in here - st["pilots_seen"]:
             note_move(key, "in")
