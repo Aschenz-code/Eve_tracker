@@ -39,7 +39,8 @@ stops drawing column headers when there are no results — run a scan first.
 |---|---|
 | open everything from one window | **eve-watch.bat** (the hub) |
 | add / remove clients or regions | **pick.bat** |
-| watch events as they happen | **events.bat** |
+| watch events as they happen | **events.bat** (Events tab) |
+| see who has been seen, in what ship, for which corp | **events.bat** (Pilots tab) |
 | check every part of the setup | **Check everything** in the hub, or **doctor.bat** |
 | stop alerting, keep watching | **pause.bat** / **resume.bat** (all clients) |
 | silence ONE client while you probe on it | **Alerts on / Alerts OFF** beside it in **pick.bat** |
@@ -82,6 +83,12 @@ unknown. A running watcher picks up new values within seconds.
 - `events.csv` — one row per event: time, client, region, event, detail, snapshot.
 - `snapshots/events/` — a PNG saved at the moment of each alert.
 - `snapshots/baseline/` — what each region saw at startup, for checking aim.
+- `pilots.json` — every name seen in an overview, with the ships they have
+  flown, their corp tickers, when they were first and last seen, and on which
+  client. Browse it in the **Pilots** tab of events.bat. It needs column
+  positions, which calibrate reads off the overview header, so a client
+  calibrated before this existed records nothing until re-calibrated once -
+  doctor.bat says which.
 
 To get the timecode **inside your OBS recording** on every event, set `obs_dir` in
 `config.json` to your OBS output folder.

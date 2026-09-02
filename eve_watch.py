@@ -68,6 +68,7 @@ LOGFILE = os.path.join(HERE, "events.log")
 CSVFILE = os.path.join(HERE, "events.csv")
 PAUSEFILE = os.path.join(HERE, "PAUSED")   # exists = the running watcher idles
 CLIPFILE  = os.path.join(HERE, "CLIPBOARD_OWNER")  # which watcher reads Ctrl+C
+PILOTS    = os.path.join(HERE, "pilots.json")      # who has been seen, in what
 
 
 def pause_path(client=None):
@@ -613,6 +614,9 @@ def ocr_rows(pil, scale=3, key_width=None):
         kept_text = normalise_glyphs(" ".join(kept))
         out.append({"text": text, "kept": kept_text,
                     "key": row_key(kept_text),
+                    # box-relative word positions, so the caller can split the
+                    # row into named columns without a second OCR pass
+                    "words": [{"x": x / scale, "text": t} for x, t in r],
                     "y": row_y[len(out)]})
     return out
 
@@ -760,6 +764,83 @@ def label_by_row(frame, box, scale, pitch, label_width=None):
         return best if best is not None and gap <= pitch else "(unreadable)"
 
     return label
+
+
+def split_columns(words, columns, box_left):
+    """Assign OCR words to named columns by x, returning {column: text}.
+
+    Splitting a row on whitespace cannot work: "Taron Badasaz Buzzard 29" is a
+    two-word pilot name, a ship and a speed, and nothing in the string says
+    where the name stops. The column positions read off the header at
+    calibration do say, so each word goes to the rightmost column that starts
+    at or before it.
+    """
+    if not columns:
+        return {}
+    order = sorted(columns.items(), key=lambda kv: kv[1])
+    out = {}
+    for w in sorted(words, key=lambda w: w["x"]):
+        rel = w["x"] - box_left
+        owner = order[0][0]
+        for name, x in order:
+            if rel >= x - 6:
+                owner = name
+            else:
+                break
+        out.setdefault(owner, []).append(w["text"])
+    return {k: " ".join(v).strip() for k, v in out.items()}
+
+
+def load_pilots():
+    try:
+        with open(PILOTS, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_pilots(book):
+    tmp = PILOTS + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(book, fh, indent=1, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, PILOTS)
+    except OSError as exc:
+        log(f"  pilots.json write failed: {exc}")
+
+
+def note_pilot(book, name, ship, corp, client, when=None):
+    """Fold one sighting into the book. Returns True if anything is new.
+
+    Keyed on the name, because that is the thing that persists - a pilot swaps
+    ships and changes corp, and the point of the record is to show exactly that.
+    """
+    name = (name or "").strip()
+    if len(name) < 3:
+        return False
+    when = when or dt.datetime.now().isoformat(timespec="seconds")
+    key = name.lower()
+    who = book.setdefault(key, {"name": name, "ships": {}, "corps": {},
+                                "clients": [], "seen": 0,
+                                "first_seen": when, "last_seen": when})
+    fresh = False
+    for field, value in (("ships", ship), ("corps", corp)):
+        value = (value or "").strip()
+        if not value:
+            continue
+        slot = who[field].setdefault(value, {"first": when, "count": 0})
+        if slot["count"] == 0:
+            fresh = True
+        slot["count"] += 1
+        slot["last"] = when
+    if client and client not in who["clients"]:
+        who["clients"].append(client)
+    who["seen"] += 1
+    who["last_seen"] = when
+    who["name"] = name                  # keep the newest spelling OCR gave us
+    return fresh
 
 
 def reportable(label, settings, require=None):
@@ -1779,6 +1860,8 @@ def cmd_add_panel(args):
                    "height": max(2 * geo["pitch"], geo["box_bottom"] - top)},
         "anchor": anchor, "key_width": geo["key_width"], "max_drift": 200,
         "label_width": geo.get("label_width"),
+        "columns": {k: int(x) - geo["box_left"]
+                    for k, x in (geo.get("columns") or {}).items()},
         "ignore": list(spec["ignore"]), "zoom": True,
         "alert": spec["mode"] != "dscan", "text_h": geo.get("text_h"),
         "say": spec["say"].format(label=name),
@@ -1899,6 +1982,12 @@ def cmd_calibrate(args):
             **({"require": r"^[a-z]{3}-\d{3}"}
                if spec["mode"] == "roster" and p["label"].startswith("sigs")
                else {}),
+            # Column offsets, so a row can be split into fields instead of
+            # guessed at by whitespace: pilot names contain spaces ("Taron
+            # Badasaz Buzzard 29" is a two-word name, a ship and a speed) and
+            # no amount of splitting tells you where the name ends.
+            "columns": {k: int(x) - geo["box_left"]
+                        for k, x in (geo.get("columns") or {}).items()},
             "anchor": anchor, "key_width": geo["key_width"],
             "label_width": geo.get("label_width"),
             "max_drift": drift, "ignore": list(spec["ignore"]),
@@ -2344,6 +2433,14 @@ def collect_health(capture=True):
         "too few: check the supervisor. too many: orphans from a supervisor "
         "that died, or a second supervisor - alerts will repeat. Restarting "
         "the supervisor clears orphans.")
+    blind_cols = [f"{short_client(r.get('window',''))}/{r['name']}"
+                  for r in cfg["regions"]
+                  if r["name"].startswith("overview") and not r.get("columns")]
+    add(not blind_cols, "overviews record pilots",
+        ", ".join(blind_cols) + " have no column data" if blind_cols
+        else f"all {sum(1 for r in cfg['regions'] if r['name'].startswith('overview'))} overview(s)",
+        "re-calibrate those clients once - column positions are read off the "
+        "header, and without them a row cannot be split into name/ship/corp")
     if paused_clients():
         add(True, "paused on their own", ", ".join(paused_clients()))
     add(not os.path.exists(PAUSEFILE), "not paused",
@@ -2717,7 +2814,14 @@ def cmd_events(args):
     root.configure(padx=10, pady=8)
     root.geometry("1150x620")
 
-    top = tk.Frame(root)
+    nb = ttk.Notebook(root)
+    nb.pack(fill="both", expand=True)
+    tab_ev = tk.Frame(nb, padx=6, pady=6)
+    tab_pl = tk.Frame(nb, padx=6, pady=6)
+    nb.add(tab_ev, text="Events")
+    nb.add(tab_pl, text="Pilots")
+
+    top = tk.Frame(tab_ev)
     top.pack(fill="x")
     tk.Label(top, text="Show:", font=("Segoe UI", 9, "bold")).pack(side="left")
     group_vars = {}
@@ -2744,11 +2848,11 @@ def cmd_events(args):
     ent.bind("<KeyRelease>", lambda e: refresh(force=True))
 
     cols = ("time", "client", "region", "event", "detail")
-    tree = ttk.Treeview(root, columns=cols, show="headings", height=24)
+    tree = ttk.Treeview(tab_ev, columns=cols, show="headings", height=24)
     for c, w in zip(cols, (150, 110, 95, 80, 640)):
         tree.heading(c, text=c)
         tree.column(c, width=w, anchor="w")
-    sb = ttk.Scrollbar(root, orient="vertical", command=tree.yview)
+    sb = ttk.Scrollbar(tab_ev, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=sb.set)
     tree.pack(side="left", fill="both", expand=True, pady=(8, 0))
     sb.pack(side="right", fill="y", pady=(8, 0))
@@ -2758,8 +2862,66 @@ def cmd_events(args):
     tree.tag_configure("dscan", foreground="#06a")
     tree.tag_configure("problem", foreground="#c80")
 
-    status = tk.Label(root, text="", font=("Segoe UI", 8), fg="#666")
+    status = tk.Label(tab_ev, text="", font=("Segoe UI", 8), fg="#666")
     status.pack(side="bottom", anchor="w")
+
+    # ---- Pilots tab: who has been seen, in what, for whom ------------------
+    ptop = tk.Frame(tab_pl)
+    ptop.pack(fill="x")
+    tk.Label(ptop, text="find:", font=("Segoe UI", 9, "bold")).pack(side="left")
+    pfind = tk.StringVar()
+    pent = tk.Entry(ptop, textvariable=pfind, width=26)
+    pent.pack(side="left", padx=(4, 0))
+    pcount = tk.Label(ptop, text="", font=("Segoe UI", 9), fg="#666")
+    pcount.pack(side="left", padx=(12, 0))
+
+    pcols = ("name", "ships", "corporations", "seen", "first", "last", "on")
+    ptree = ttk.Treeview(tab_pl, columns=pcols, show="headings", height=24)
+    for c, w in zip(pcols, (170, 300, 190, 55, 135, 135, 120)):
+        ptree.heading(c, text=c)
+        ptree.column(c, width=w, anchor="w")
+    psb = ttk.Scrollbar(tab_pl, orient="vertical", command=ptree.yview)
+    ptree.configure(yscrollcommand=psb.set)
+    ptree.pack(side="left", fill="both", expand=True, pady=(8, 0))
+    psb.pack(side="right", fill="y", pady=(8, 0))
+    pstate = {"mtime": None}
+
+    def pilots_refresh(force=False):
+        try:
+            stamp = os.path.getmtime(PILOTS)
+        except OSError:
+            stamp = None
+        if not force and stamp == pstate["mtime"]:
+            return
+        pstate["mtime"] = stamp
+        book = load_pilots()
+        need = pfind.get().strip().lower()
+        ptree.delete(*ptree.get_children())
+        rows = sorted(book.values(), key=lambda w: w.get("last_seen", ""),
+                      reverse=True)
+        shown = 0
+        for who in rows:
+            # most-flown ship first: what someone usually undocks in is the
+            # useful fact, not whatever they happened to be in last
+            ships = sorted(who.get("ships", {}).items(),
+                           key=lambda kv: -kv[1].get("count", 0))
+            corps = sorted(who.get("corps", {}).items(),
+                           key=lambda kv: -kv[1].get("count", 0))
+            ship_s = ", ".join(k for k, _ in ships)
+            corp_s = ", ".join(k for k, _ in corps)
+            blob = f"{who.get('name','')} {ship_s} {corp_s}".lower()
+            if need and need not in blob:
+                continue
+            ptree.insert("", "end", values=(
+                who.get("name", ""), ship_s, corp_s, who.get("seen", 0),
+                who.get("first_seen", "")[:16].replace("T", " "),
+                who.get("last_seen", "")[:16].replace("T", " "),
+                ", ".join(who.get("clients", []))))
+            shown += 1
+        pcount.configure(text=f"{shown} of {len(book)} pilot(s)")
+
+    pent.bind("<KeyRelease>", lambda e: pilots_refresh(force=True))
+    pilots_refresh(force=True)
     shots = {}
     seen = {"sig": None}
 
@@ -2822,6 +2984,7 @@ def cmd_events(args):
 
     def tick():
         refresh()
+        pilots_refresh()
         root.after(int(args.every * 1000), tick)
 
     tick()
@@ -3578,6 +3741,7 @@ def cmd_watch(args):
               "row_h": r.get("row_height", r.get("row_pitch", 20) - 2),
               "key_width": r.get("key_width"),
               "label_width": r.get("label_width"),
+              "columns": r.get("columns") or None,
               "pix_ncc": r.get("pix_ncc", 0.90),
               "pix_min_lit": r.get("pix_min_lit", 20),
               "row_offset": r.get("row_offset", 0),
@@ -3681,6 +3845,25 @@ def cmd_watch(args):
         log(f"*** {event.upper()} in {name!r}: {detail}  ->  {os.path.basename(shot)}{at}")
         if alarm:
             raise_alarm(phrase or st["say"], f"{name}: {detail}\n\n{shot}", args)
+
+    book, book_dirty, book_saved = load_pilots(), False, time.time()
+
+    def record_pilots(st, frame, box, s):
+        """Fold every visible overview row into the pilot book.
+
+        Every row, not only arrivals: the point is a record of who has been
+        seen in what, and a pilot sitting on grid when the watcher starts is
+        just as much a sighting as one that warps in.
+        """
+        nonlocal book_dirty
+        rows = ocr_rows(to_image(crop(frame, box)), s["ocr_scale"])
+        for row in rows:
+            if ignored(row["text"], st["cfg"]) or is_noise_row(row["text"]):
+                continue
+            f = split_columns(row.get("words") or [], st["columns"], 0)
+            if note_pilot(book, f.get("name"), f.get("type"),
+                          f.get("corporation"), TAG):
+                book_dirty = True
 
     try:
         while True:
@@ -3859,6 +4042,8 @@ def cmd_watch(args):
                     if st["identity"] == "pixels":
                         _label = label_by_row(frame, box, s["ocr_scale"],
                                               st["pitch"], st["label_width"])
+                        if st["columns"] and name.startswith("overview"):
+                            record_pilots(st, frame, box, s)
                         arrived, departed = reconcile_pixels(
                             st, frame, box, thr, st["cfg"], _label)
                         for gone in departed:
@@ -4025,6 +4210,10 @@ def cmd_watch(args):
                 b = state[regions[0]["name"]]["tr"].locate(frame) or regions[0]["target"]
                 to_image(context_crop(frame, b, s["pad"])).save(
                     os.path.join(rec, dt.datetime.now().strftime("%Y%m%d_%H%M%S") + ".png"))
+
+            if book_dirty and time.time() - book_saved > 20:
+                save_pilots(book)
+                book_dirty, book_saved = False, time.time()
 
             if time.time() >= next_beat:
                 next_beat = time.time() + 60

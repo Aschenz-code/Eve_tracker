@@ -30,3 +30,5 @@ config.json.tmp
 config.json.prev
 CLIPBOARD_OWNER
 PAUSED.*
+pilots.json
+pilots.json.tmp
