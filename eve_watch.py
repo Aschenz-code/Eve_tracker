@@ -811,35 +811,93 @@ def save_pilots(book):
         log(f"  pilots.json write failed: {exc}")
 
 
-def note_pilot(book, name, ship, corp, client, when=None):
+TICKER = re.compile(r"^[\[(]([A-Z0-9.' -]{1,6})[\])]$")
+_EDGE  = re.compile(r"^[^0-9A-Za-z]+|[^0-9A-Za-z')]+$")
+
+
+def clean_field(text):
+    """Strip the punctuation OCR hangs on a column edge.
+
+    The same sighting produced "OwlShadow", "OwlShadow_" and "OwlShadow-" on
+    three consecutive passes, and each became its own pilot. EVE character
+    names cannot end in an underscore and ship types are letters and spaces,
+    so trailing marks are artifacts every time.
+    """
+    return _EDGE.sub("", " ".join((text or "").split()))
+
+
+def clean_ticker(text):
+    """A corp ticker, or nothing. Tickers are bracketed; "(AXAPII" is a misread."""
+    # Match BEFORE cleaning the edges: cleaning strips the very brackets that
+    # tell a real ticker from a misread of one. A bracket must be present on at
+    # least one side - that is what marks this as the corp column and not a
+    # word that drifted in - but the closing one is often read as a letter
+    # ("(AXAPII" for "[AXAPI]"), so repair that rather than discard the corp.
+    raw = " ".join((text or "").split())
+    if not raw or raw[0] not in "[(" and raw[-1] not in "])":
+        return ""
+    inner = raw.lstrip("[(").rstrip("])")
+    ok = re.compile(r"[A-Z0-9.'\-]{2,5}")
+    if ok.fullmatch(inner):
+        return inner                    # reads cleanly, do not "repair" it
+    if raw[-1] not in "])":
+        trimmed = re.sub(r"[Iil1]$", "", inner)
+        if ok.fullmatch(trimmed):
+            return trimmed
+    return ""
+
+
+def pilot_key(name):
+    return clean_field(name).casefold()
+
+
+def note_pilot(book, name, ship, corp, client, when=None, visit=True):
     """Fold one sighting into the book. Returns True if anything is new.
 
     Keyed on the name, because that is the thing that persists - a pilot swaps
     ships and changes corp, and the point of the record is to show exactly that.
     """
-    name = (name or "").strip()
+    name = clean_field(name)
     if len(name) < 3:
         return False
     when = when or dt.datetime.now().isoformat(timespec="seconds")
-    key = name.lower()
+    key = pilot_key(name)
+
+    # OCR wobbles a character now and then, and a long-lived record must not
+    # split one pilot across those spellings. Cleaning the edges catches most of
+    # it; a near-match catches the rest. The bar is high on purpose - a wrong
+    # merge fuses two real pilots for good, which is worse than a duplicate.
+    if key not in book:
+        near = fuzzy_match(key, list(book), 0.93)
+        if near and abs(len(near) - len(key)) <= 2:
+            book[near].setdefault("aka", [])
+            if name not in book[near]["aka"] and name != book[near]["name"]:
+                book[near]["aka"].append(name)
+            key = near
+
     who = book.setdefault(key, {"name": name, "ships": {}, "corps": {},
-                                "clients": [], "seen": 0,
+                                "clients": [], "seen": 0, "aka": [],
                                 "first_seen": when, "last_seen": when})
     fresh = False
-    for field, value in (("ships", ship), ("corps", corp)):
-        value = (value or "").strip()
+    for field, value in (("ships", clean_field(ship)),
+                         ("corps", clean_ticker(corp))):
         if not value:
             continue
         slot = who[field].setdefault(value, {"first": when, "count": 0})
         if slot["count"] == 0:
             fresh = True
-        slot["count"] += 1
+        # count sightings, not polls: the roster is re-read every few seconds
+        # and counting those made "seen" a measure of uptime, not of encounters.
+        # A ship or corp read for the first time counts even mid-visit - it is
+        # new information, and OCR often only resolves the corp on a later pass.
+        if visit or slot["count"] == 0:
+            slot["count"] += 1
         slot["last"] = when
     if client and client not in who["clients"]:
         who["clients"].append(client)
-    who["seen"] += 1
+    if visit:
+        who["seen"] += 1
     who["last_seen"] = when
-    who["name"] = name                  # keep the newest spelling OCR gave us
     return fresh
 
 
@@ -3742,6 +3800,7 @@ def cmd_watch(args):
               "key_width": r.get("key_width"),
               "label_width": r.get("label_width"),
               "columns": r.get("columns") or None,
+              "pilots_seen": set(),
               "pix_ncc": r.get("pix_ncc", 0.90),
               "pix_min_lit": r.get("pix_min_lit", 20),
               "row_offset": r.get("row_offset", 0),
@@ -3857,13 +3916,25 @@ def cmd_watch(args):
         """
         nonlocal book_dirty
         rows = ocr_rows(to_image(crop(frame, box)), s["ocr_scale"])
+        here = set()
         for row in rows:
             if ignored(row["text"], st["cfg"]) or is_noise_row(row["text"]):
                 continue
             f = split_columns(row.get("words") or [], st["columns"], 0)
-            if note_pilot(book, f.get("name"), f.get("type"),
-                          f.get("corporation"), TAG):
+            who = clean_field(f.get("name"))
+            if len(who) < 3:
+                continue
+            key = pilot_key(who)
+            here.add(key)
+            # A visit, not a poll: the roster is re-read every few seconds, so
+            # counting every pass measured how long the client was open rather
+            # than how often this pilot was actually seen.
+            if note_pilot(book, who, f.get("type"), f.get("corporation"), TAG,
+                          visit=key not in st["pilots_seen"]):
                 book_dirty = True
+        if here != st["pilots_seen"]:
+            book_dirty = True
+        st["pilots_seen"] = here
 
     try:
         while True:
