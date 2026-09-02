@@ -2937,6 +2937,9 @@ def cmd_events(args):
     ent.pack(side="left")
     ent.bind("<KeyRelease>", lambda e: refresh(force=True))
 
+    tk.Button(top, text="Refresh", width=10,
+              command=lambda: both(force=True)).pack(side="left", padx=(16, 0))
+
     cols = ("time", "client", "region", "event", "detail")
     tree = ttk.Treeview(tab_ev, columns=cols, show="headings", height=24)
     for c, w in zip(cols, (150, 110, 95, 80, 640)):
@@ -2962,6 +2965,8 @@ def cmd_events(args):
     pfind = tk.StringVar()
     pent = tk.Entry(ptop, textvariable=pfind, width=26)
     pent.pack(side="left", padx=(4, 0))
+    tk.Button(ptop, text="Refresh", width=10,
+              command=lambda: both(force=True)).pack(side="left", padx=(16, 0))
     pcount = tk.Label(ptop, text="", font=("Segoe UI", 9), fg="#666")
     pcount.pack(side="left", padx=(12, 0))
 
@@ -3082,10 +3087,20 @@ def cmd_events(args):
                            f"double-click a row to open its snapshot   "
                            f"updated {dt.datetime.now():%H:%M:%S}")
 
+    def both(force=False):
+        """Redraw both tabs. A watcher writes the two files on its own
+        schedule - pilots.json is flushed every 20s or so - and the automatic
+        pass only redraws what changed, so a button that redraws regardless is
+        the difference between waiting and knowing."""
+        refresh(force=force)
+        pilots_refresh(force=force)
+
     def tick():
-        refresh()
-        pilots_refresh()
+        both()
         root.after(int(args.every * 1000), tick)
+
+    root.bind("<F5>", lambda e: both(force=True))
+    root.bind("<Control-r>", lambda e: both(force=True))
 
     tick()
     if args.seconds:

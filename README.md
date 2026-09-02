@@ -39,7 +39,7 @@ stops drawing column headers when there are no results — run a scan first.
 |---|---|
 | open everything from one window | **eve-watch.bat** (the hub) |
 | add / remove clients or regions | **pick.bat** |
-| watch events as they happen | **events.bat** (Events tab) |
+| watch events as they happen | **events.bat** (Events tab) — updates itself, or press **Refresh** / F5 |
 | see who has been seen, in what ship, for which corp | **events.bat** (Pilots tab) |
 | check every part of the setup | **Check everything** in the hub, or **doctor.bat** |
 | stop alerting, keep watching | **pause.bat** / **resume.bat** (all clients) |
