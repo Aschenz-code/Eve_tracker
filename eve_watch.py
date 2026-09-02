@@ -770,6 +770,24 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
     nmin = st["pix_ncc"]
 
     pad = st["pix_pad"]
+    clip = st["pix_clip"]
+
+    # Filter the whole box ONCE, then cut cells out of the filtered image.
+    # Cropping first and filtering after gives the 3x3 median no neighbours at
+    # the crop border, so a tight template does not equal those same pixels
+    # inside the padded search window: measured 0.9055 against itself, not
+    # 1.0000, on rows whose text touches the cell edge (18-30 lit border px).
+    # Four of one client's eleven rows fell under the 0.90 bar that way and were
+    # never confirmed, so a new signature everyone else saw went unreported,
+    # while a client whose rows sat clear of their borders scored 1.0000.
+    filt = despeckle(apply_clip(to_gray(crop(frame, box)), clip))
+    bx, by = box["left"], box["top"]
+
+    def cut(left, top, width, height):
+        y0, x0 = max(0, top - by), max(0, left - bx)
+        return filt[y0:min(filt.shape[0], top - by + height),
+                    x0:min(filt.shape[1], left - bx + width)]
+
     occupied = []
     for cell in row_cells(box, st["pitch"], st["row_h"],
                           st["key_width"] or box["width"], st["row_offset"]):
@@ -778,17 +796,15 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
             continue
         if int(text_mask(patch, threshold).sum()) < st["pix_min_lit"]:
             continue
-        wide = {"left": cell["left"] - pad, "top": cell["top"] - pad,
-                "width": cell["width"] + 2 * pad,
-                "height": cell["height"] + 2 * pad}
         # Zero the background before correlating. EVE re-shades a row when the
         # list around it changes - the same row measured 48 then 30 - and raw
         # correlation reads that as a different row (0.87 against a 0.95 bar).
         # Clipping to the text leaves only glyph pixels: the same row scores
         # 1.0000, a different one 0.35.
-        clip = st["pix_clip"]
-        occupied.append((despeckle(apply_clip(to_gray(crop(frame, wide)), clip)),
-                         despeckle(apply_clip(to_gray(patch), clip)), cell))
+        occupied.append((cut(cell["left"] - pad, cell["top"] - pad,
+                             cell["width"] + 2 * pad, cell["height"] + 2 * pad),
+                         cut(cell["left"], cell["top"],
+                             cell["width"], cell["height"]), cell))
 
     used, fresh = set(), []
     for search, exact, cell in occupied:
