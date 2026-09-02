@@ -900,7 +900,7 @@ def same_pilot(a, b):
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.72
 
 
-def resolve_key(book, name):
+def resolve_key(book, name, extra=()):
     """The key this name belongs under, folding OCR damage into one pilot.
 
     Presence has to use the same answer the book does, or a pilot flickers:
@@ -910,12 +910,40 @@ def resolve_key(book, name):
     key = pilot_key(name)
     if key in book:
         return key
-    hits = [k for k in book if same_pilot(key, k)]
+    # Candidates include names merely SEEN before, not just recorded ones. A
+    # first sighting has nothing in the book to fold against, so "Russian
+    # Revolution" arriving as "RussianRevolution" then "Russian -Revolution"
+    # became two keys, neither repeated, and the pilot was never recorded at
+    # all - present in the log, absent from the book.
+    pool = list(book) + [k for k in extra if k not in book]
+    if key in pool:
+        return key
+    hits = [k for k in pool if same_pilot(key, k)]
     if len(hits) == 1:
         return hits[0]
     if len(hits) > 1:                   # ambiguous: prefer the closest
         return max(hits, key=lambda k: difflib.SequenceMatcher(None, key, k).ratio())
     return key
+
+
+def name_score(text):
+    """Rank two spellings of one name. Lower is better.
+
+    Length alone picks the wrong one: "Russian -Revolution" is longer than
+    "Russian Revolution" only because of a stray dash. But hyphens and
+    apostrophes are legal in EVE names, so they cannot simply be penalised -
+    "O'Brien-Smith" is a real name. What separates them is position: a legal
+    mark sits BETWEEN letters, an OCR artifact sits beside a space or an end.
+    """
+    stray = 0
+    for i, ch in enumerate(text):
+        if ch.isalnum() or ch == " ":
+            continue
+        before = text[i - 1] if i else " "
+        after = text[i + 1] if i + 1 < len(text) else " "
+        if not (before.isalnum() and after.isalnum()):
+            stray += 1
+    return (stray, -len(text))
 
 
 def pilot_key(name):
@@ -944,6 +972,21 @@ def note_pilot(book, name, ship, corp, client, when=None, visit=True):
         if name not in book[hit]["aka"] and name != book[hit]["name"]:
             book[hit]["aka"].append(name)
     key = hit
+
+    # The fullest spelling wins as the display name. OCR loses characters and
+    # joins words - "Russian Revolution" came back as "RussianRevolution" - so
+    # the longest reading is the one closest to what is on screen. (Ships go the
+    # other way: there OCR SPLITS a word, so fewest gaps wins.)
+    if key in book:
+        held = book[key].get("name", "")
+        loser = name if name_score(held) <= name_score(name) else held
+        winner = held if loser == name else name
+        book[key]["name"] = winner
+        aka = book[key].setdefault("aka", [])
+        if loser and loser != winner and loser not in aka:
+            aka.append(loser)
+        if winner in aka:
+            aka.remove(winner)
 
     who = book.setdefault(key, {"name": name, "ships": {}, "corps": {},
                                 "clients": [], "seen": 0, "aka": [],
@@ -3996,6 +4039,7 @@ def cmd_watch(args):
               "columns": r.get("columns") or None,
               "pilots_seen": set(),
               "pilot_reads": {},
+              "seen_names": set(),
               "last_dist": {},
               "hole_dist": None,
               "pix_ncc": r.get("pix_ncc", 0.90),
@@ -4272,7 +4316,8 @@ def cmd_watch(args):
             # column is the flakiest of the three, and folding it into the
             # confirmation made a pass that missed it look like the pilot had
             # gone - a false departure, and now a false "took the wormhole".
-            key = resolve_key(book, who)
+            key = resolve_key(book, who, st["seen_names"])
+            st["seen_names"].add(key)
             here.add(key)
 
             # What gets WRITTEN still has to repeat. The same pixels read as
@@ -4303,7 +4348,13 @@ def cmd_watch(args):
                 entry["now_by"] = TAG
                 entry["now_at"] = dt.datetime.now().isoformat(timespec="seconds")
                 book_dirty = True
+        st["arrived_names"] = []
         for key in here - st["pilots_seen"]:
+            entry = book.get(key)
+            if entry:
+                hull = entry.get("now_ship") or ""
+                st["arrived_names"].append(
+                    f"{entry['name']} {hull}".strip())
             note_move(key, "in")
         for key in st["pilots_seen"] - here:
             note_move(key, "out", track=st["last_dist"].get(key),
@@ -4532,10 +4583,15 @@ def cmd_watch(args):
                                          obs_dir=obs_dir)
                         if arrived:
                             st["changes"] += len(arrived)
-                            detail = " | ".join(arrived)
-                            phrase = (f"{st['say']}. {arrived[0]}"
-                                      if len(arrived) == 1
-                                      else f"{st['say']}. {len(arrived)} new")
+                            # Prefer the three-pass merged reading over the
+                            # single-pass label: the label is what put
+                            # "_RussianRevolution -Helios" in the log.
+                            shown = st.get("arrived_names") or arrived
+                            st["arrived_names"] = []
+                            detail = " | ".join(shown)
+                            phrase = (f"{st['say']}. {shown[0]}"
+                                      if len(shown) == 1
+                                      else f"{st['say']}. {len(shown)} new")
                             fire(name, st, box, frame, "arrive", detail, phrase,
                                  alarm=st["alert"])
                         continue
