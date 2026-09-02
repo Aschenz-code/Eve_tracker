@@ -942,6 +942,47 @@ def note_pilot(book, name, ship, corp, client, when=None, visit=True):
     return fresh
 
 
+def field_samples(frame, box, scale, columns, pads=(0, 4, 12)):
+    """Read the same rows several times at different crops, keep the best.
+
+    Windows OCR is deterministic for a given input but wildly sensitive to the
+    crop it is handed, and not monotonically: the same saved row read
+    "OwlShadow Prospect" at 4 and 12px of margin and "os ect" at 0, 8, 16, 24
+    and 48. There is no margin that is simply better, so stop looking for one
+    and take several readings of the same pixels instead.
+
+    Merged per column, preferring the longest value: OCR drops and splits
+    glyphs, it does not invent them, so between "Prospect" and "os ect" the
+    longer one is the one that survived intact. Returns {slot_y: {column: text}}.
+    """
+    out = {}
+    for pad in pads:
+        left = max(0, box["left"] - pad)
+        top = max(0, box["top"] - pad)
+        dx, dy = box["left"] - left, box["top"] - top
+        crop_box = {"left": left, "top": top,
+                    "width": box["width"] + dx + pad,
+                    "height": box["height"] + dy + pad}
+        patch = crop(frame, crop_box)
+        if patch.shape[0] < 8 or patch.shape[1] < 8:
+            continue
+        for row in ocr_rows(to_image(patch), scale):
+            y = row["y"] - dy
+            slot = next((k for k in out if abs(k - y) <= 6), None)
+            if slot is None:
+                slot = y
+                out[slot] = {}
+            fields = split_columns(row.get("words") or [], columns, dx)
+            for key, value in fields.items():
+                value = clean_field(value)
+                if not value:
+                    continue
+                have = out[slot].get(key, "")
+                if (len(value), -value.count(" ")) > (len(have), -have.count(" ")):
+                    out[slot][key] = value
+    return out
+
+
 def reportable(label, settings, require=None):
     """Whether a detected row is worth telling the user about.
 
@@ -3994,7 +4035,7 @@ def cmd_watch(args):
         just as much a sighting as one that warps in.
         """
         nonlocal book_dirty
-        rows = ocr_rows(to_image(crop(frame, box)), s["ocr_scale"])
+        best = field_samples(frame, box, s["ocr_scale"], st["columns"])
         here = set()
 
         # Only text sitting in an occupied row slot counts. Reading every line
@@ -4013,13 +4054,12 @@ def cmd_watch(args):
                 continue
             slots.append(cell["top"] - box["top"] + cell["height"] / 2)
 
-        for row in rows:
-            if not any(abs(row["y"] - c) <= max(3, st["pitch"] / 4)
-                       for c in slots):
+        for y, f in best.items():
+            if not any(abs(y - c) <= max(3, st["pitch"] / 4) for c in slots):
                 continue
-            if ignored(row["text"], st["cfg"]) or is_noise_row(row["text"]):
+            whole = " ".join(v for v in f.values() if v)
+            if ignored(whole, st["cfg"]) or is_noise_row(whole):
                 continue
-            f = split_columns(row.get("words") or [], st["columns"], 0)
             who = clean_field(f.get("name"))
             ship = clean_field(f.get("type"))
             if not looks_like_pilot(who, ship):
