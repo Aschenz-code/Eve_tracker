@@ -872,6 +872,34 @@ def looks_like_pilot(name, ship):
     return name.casefold() != ship.casefold()   # wormholes, belts, beacons
 
 
+def same_pilot(a, b):
+    """Whether two OCR spellings are the same name.
+
+    Two failure modes, two rules. OCR drops glyphs off the ENDS, so a bad
+    reading is often a piece of the good one - "edro" inside "redron" - which
+    containment catches. It also mangles the MIDDLE of a long name:
+    "Iranama Hega Zirud" came back as "Iranama He Tirud" and "Iranama He a Z",
+    three separate pilots in the book. Those score 0.73-0.88, while every pair
+    of genuinely different names recorded scored at most 0.40.
+
+    A similarity bar alone would still be unsafe - "Meki Raz" against a real
+    "Neki Raz" scores 0.88 - so it is paired with a shared opening. Damage to
+    the front is what containment is for; this rule is for damage after it.
+    """
+    if len(a) >= 4 and a in b or len(b) >= 4 and b in a:
+        return True
+    lead = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        lead += 1
+    if lead < 6 or min(len(a), len(b)) < 8:
+        return False
+    if abs(len(a) - len(b)) > max(4, min(len(a), len(b)) // 2):
+        return False
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.72
+
+
 def resolve_key(book, name):
     """The key this name belongs under, folding OCR damage into one pilot.
 
@@ -882,13 +910,11 @@ def resolve_key(book, name):
     key = pilot_key(name)
     if key in book:
         return key
-    inside = [k for k in book
-              if len(key) >= 4 and key in k or len(k) >= 4 and k in key]
-    if len(inside) == 1:
-        return inside[0]
-    near = fuzzy_match(key, list(book), 0.93)
-    if near and abs(len(near) - len(key)) <= 2:
-        return near
+    hits = [k for k in book if same_pilot(key, k)]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:                   # ambiguous: prefer the closest
+        return max(hits, key=lambda k: difflib.SequenceMatcher(None, key, k).ratio())
     return key
 
 
@@ -4101,9 +4127,13 @@ def cmd_watch(args):
         nonlocal book_dirty
         who = book.get(key)
         name = who["name"] if who else key
+        flying = ""
         if who is not None:
             who["last_dir"] = direction
             who["last_by"] = TAG
+            flying = who.get("now_ship") or who.get("last_ship") or ""
+            if flying:
+                who["last_ship"] = flying
             if direction == "out":
                 who.pop("now_ship", None)
                 who.pop("now_at", None)
@@ -4124,19 +4154,32 @@ def cmd_watch(args):
                    and track[-1] - track[-2] > 5_000)
         if (direction == "out" and was_at is not None and hole_at is not None
                 and abs(was_at - hole_at) <= 10_000 and not leaving):
+            in_what = f" in {flying}" if flying else ""
             if who is not None:
                 who["jumps"] = who.get("jumps", 0) + 1
-                who["last_note"] = f"took the hole {dt.datetime.now():%H:%M:%S}"
+                who["last_note"] = (f"took the hole {dt.datetime.now():%H:%M:%S}"
+                                    f"{in_what}")
                 book_dirty = True
-            log(f"** {name} TOOK THE WORMHOLE - vanished {abs(was_at - hole_at)/1000:.1f}km "
-                f"from it, last seen at {was_at/1000:.0f}km")
-            record_event(started, "overview", "hole", name, obs_dir=obs_dir)
-            raise_alarm(f"someone took the wormhole. {name}",
-                        f"{name} vanished on the wormhole "
+            log(f"** {name}{in_what} TOOK THE WORMHOLE - vanished "
+                f"{abs(was_at - hole_at)/1000:.1f}km from it, last seen at "
+                f"{was_at/1000:.0f}km")
+            record_event(started, "overview", "hole", f"{name}{in_what}",
+                         obs_dir=obs_dir)
+            raise_alarm(f"someone took the wormhole. {name}{in_what}",
+                        f"{name}{in_what} vanished on the wormhole "
                         f"({abs(was_at - hole_at)/1000:.1f} km from it)", args)
-        elif direction == "out" and was_at is not None:
+        elif direction == "out":
+            # Every pilot gets a status. Warping off is the commonest way to
+            # leave and it matched no inference, which left the tab blank and
+            # looking like something had failed.
             why = " while opening range" if leaving else ""
-            log(f"   {name} left at {was_at/1000:.0f}km{why}"
+            at = f" at {was_at/1000:.0f}km" if was_at is not None else ""
+            in_what = f" in {flying}" if flying else ""
+            if who is not None:
+                who["last_note"] = (f"left {dt.datetime.now():%H:%M:%S}"
+                                    f"{at}{in_what}")
+                book_dirty = True
+            log(f"   {name} left{at}{why}{in_what}"
                 + (f" (hole is at {hole_at/1000:.0f}km)" if hole_at else ""))
         moves.append((time.time(), key, direction))
         del moves[:-40]
@@ -4169,16 +4212,26 @@ def cmd_watch(args):
                 continue
             pending_counts.remove(entry)
             _, key = hit
+            # Re-resolve: the move may have been filed under a spelling the
+            # book has since folded in, and reporting the raw key printed a
+            # pilot that does not exist ("meki baz docked").
+            key = resolve_key(book, key)
             who = book.get(key)
             name = who["name"] if who else key
             verb = "docked" if up else "undocked"
+            flying = ""
             if who is not None:
+                flying = who.get("now_ship") or who.get("last_ship") or ""
                 who[verb] = who.get(verb, 0) + 1
-                who["last_note"] = f"{verb} {dt.datetime.now():%H:%M:%S}"
+                who["last_note"] = (f"{verb} {dt.datetime.now():%H:%M:%S}"
+                                    + (f" in {flying}" if flying else ""))
                 book_dirty = True
-            log(f"** {name} {verb} (structure count {'up' if up else 'down'} "
-                f"within {abs(hit[0] - at):.0f}s of the overview change)")
-            record_event(started, "structure", verb, name, obs_dir=obs_dir)
+            in_what = f" in {flying}" if flying else ""
+            log(f"** {name}{in_what} {verb} (structure count "
+                f"{'up' if up else 'down'} within {abs(hit[0] - at):.0f}s of "
+                f"the overview change)")
+            record_event(started, "structure", verb, f"{name}{in_what}",
+                         obs_dir=obs_dir)
 
     def record_pilots(st, frame, box, s):
         """Fold every visible overview row into the pilot book.
