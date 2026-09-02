@@ -893,6 +893,22 @@ def note_pilot(book, name, ship, corp, client, when=None, visit=True):
     # it; a near-match catches the rest. The bar is high on purpose - a wrong
     # merge fuses two real pilots for good, which is worse than a duplicate.
     if key not in book:
+        # OCR drops glyphs off the ends of a word, so a bad reading tends to be
+        # a piece of the good one: "Redron" came back as "edro". Containment
+        # catches that where a similarity score cannot - "edro" against
+        # "redron" scores 0.80, and no threshold that accepts it is safe for
+        # names in general.
+        inside = [k for k in book
+                  if len(key) >= 4 and key in k
+                  or len(k) >= 4 and k in key]
+        if len(inside) == 1:
+            hit = inside[0]
+            longer = hit if len(hit) >= len(key) else key
+            if longer != hit:           # the new spelling is the fuller one
+                book[longer] = book.pop(hit)
+                book[longer]["name"] = name
+            key = longer
+    if key not in book:
         near = fuzzy_match(key, list(book), 0.93)
         if near and abs(len(near) - len(key)) <= 2:
             book[near].setdefault("aka", [])
@@ -3858,6 +3874,7 @@ def cmd_watch(args):
               "label_width": r.get("label_width"),
               "columns": r.get("columns") or None,
               "pilots_seen": set(),
+              "pilot_reads": {},
               "pix_ncc": r.get("pix_ncc", 0.90),
               "pix_min_lit": r.get("pix_min_lit", 20),
               "row_offset": r.get("row_offset", 0),
@@ -4006,6 +4023,16 @@ def cmd_watch(args):
             who = clean_field(f.get("name"))
             ship = clean_field(f.get("type"))
             if not looks_like_pilot(who, ship):
+                continue
+
+            # One OCR pass is not evidence. The same pixels of one row read as
+            # "Redron Porpoise", "Redron Po Oise" and "edro o Oise" depending
+            # on nothing the tool controls - padding it more made it worse, not
+            # better - so a reading must repeat before it goes in the book. A
+            # wrong read varies; the right one keeps coming back the same.
+            token = (who, ship, clean_ticker(f.get("corporation")))
+            st["pilot_reads"][token] = st["pilot_reads"].get(token, 0) + 1
+            if st["pilot_reads"][token] < 2:
                 continue
 
             key = pilot_key(who)
