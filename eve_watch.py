@@ -873,13 +873,20 @@ def clean_ticker(text):
     # word that drifted in - but the closing one is often read as a letter
     # ("(AXAPII" for "[AXAPI]"), so repair that rather than discard the corp.
     raw = " ".join((text or "").split())
-    if not raw or raw[0] not in "[(" and raw[-1] not in "])":
+    if not raw:
         return ""
+    # Brackets are optional. Requiring one was a stand-in for "this came from
+    # the corporation column", which column assignment by x now guarantees on
+    # its own - and OCR drops the brackets often enough that the rule was
+    # discarding real tickers: "[-418-]" came back as "-418-" and was refused.
+    bracketed = raw[0] in "[(" or raw[-1] in "])"
     inner = raw.lstrip("[(").rstrip("])")
     ok = re.compile(r"[A-Z0-9.'\-]{2,5}")
     if ok.fullmatch(inner):
         return inner                    # reads cleanly, do not "repair" it
-    if raw[-1] not in "])":
+    # Only repair a closing bracket read as a letter when an opening one is
+    # actually there - otherwise a bare ticker ending in I or 1 gets trimmed.
+    if bracketed and raw[-1] not in "])":
         trimmed = re.sub(r"[Iil1]$", "", inner)
         if ok.fullmatch(trimmed):
             return trimmed
