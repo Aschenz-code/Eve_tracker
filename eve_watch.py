@@ -1054,10 +1054,19 @@ NAME_OK = re.compile(r"^[0-9A-Za-z' -]+$")
 # leaving that to a per-region ignore list was not enough: a recalibration
 # rewrites those lists, and a scanner probe walked back into the pilot book
 # the moment one did.
+ROMAN = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
+         "xi", "xii", "xiii", "xiv", "xv", "xvi", "xvii", "xviii", "xix", "xx"}
+
 SCENERY = ("wormhole", "asteroid", "beacon", "moon", "planet", "star",
            "stargate", "station", "customs", "gate", "cloud", "container",
            "probe", "drone", "wreck", "cargo", "celestial", "acceleration",
-           "command centre", "command center", "structure", "citadel")
+           "command centre", "command center", "structure", "citadel",
+           # every player-ownable structure hull, because they carry names
+           # their owners chose: "Hedaleolfarber" turned out to be a Metenox
+           # Moon Drill and there is nothing in that name to give it away
+           "astrahus", "fortizar", "keepstar", "raitaru", "azbel", "sotiyo",
+           "athanor", "tatara", "metenox", "ansiblex", "tenebrex", "pharolux",
+           "skyhook", "orbital", "depot", "container", "hangar", "refinery")
 
 
 def is_environment(name, ship):
@@ -1102,8 +1111,19 @@ def is_environment(name, ship):
     # "asteroid".startswith("astero") made the hull Astero scenery whatever
     # bar was set. On the ratio, Astero scores 0.857 against asteroid and is
     # safe, while "stargate" and "celestial" match themselves outright.
-    if tail and any(difflib.SequenceMatcher(None, tail, term).ratio() >= 0.90
-                    for term in SCENERY):
+    # EVERY word of the type, not just the first: a structure names itself in
+    # the middle of its type ("Metenox Moon Drill") and a first-word check
+    # walked straight past it. Safe at 0.90 - no hull word comes that close to
+    # one of these, Astero against asteroid included at 0.857.
+    if any(difflib.SequenceMatcher(None, w, term).ratio() >= 0.90
+           for w in b.split() for term in SCENERY):
+        return True
+    # A planet, moon or customs office is "<System> <roman numeral>", and its
+    # type names a faction rather than a hull - "Shirshocin III" with a type
+    # of "Amarr Standard" became a pilot. The numeral is the reliable half; l
+    # and 1 stand in for I, so "Ill" has to count.
+    last = (a.split() or [""])[-1]
+    if len(a.split()) > 1 and last.replace("l", "i").replace("1", "i") in ROMAN:
         return True
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.7
 
@@ -1383,10 +1403,23 @@ def field_samples(frame, box, scale, columns, pads=(0, 4, 12)):
     # cleanest reading, then the longest. Longest alone was wrong: a row read
     # "J144944 - Rooftop" by two crops and "J 14 4 9 - Rooftop" by one, and
     # length handed it to the single damaged vote.
+    def rank(value, votes):
+        """Most letters first, then cleanest, then the majority.
+
+        Majority alone picked "Ame fer" over "Amelfer" - two crops lost the l
+        and one did not, and the vote went with the pair. OCR drops characters
+        and splits words; it does not invent letters. So the reading carrying
+        the most letters and digits is the one closest to the screen, and the
+        vote only settles a tie. Spaces break the tie last, which keeps
+        "Russian Revolution" ahead of "RussianRevolution".
+        """
+        stray, _ = name_score(value)
+        letters = sum(c.isalnum() for c in value)
+        return (letters, -stray, votes, value.count(" "))
+
     for slot, fields in out.items():
         for key, tally in (fields.get("_votes") or {}).items():
-            fields[key] = max(tally, key=lambda v: (tally[v],) + tuple(
-                -x for x in name_score(v)))
+            fields[key] = max(tally, key=lambda v: rank(v, tally[v]))
     return out
 
 
