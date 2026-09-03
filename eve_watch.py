@@ -4716,8 +4716,11 @@ def cmd_watch(args):
               "fuzzy": r.get("roster_fuzzy", s["roster_fuzzy"]),
               "require": re.compile(r["require"]) if r.get("require") else None,
               "identity": r.get("identity", "text"),
-              "pitch": r.get("row_pitch", 20),
-              "row_h": r.get("row_height", r.get("row_pitch", 20) - 2),
+              # `or`, not a get default: a key present but null - which is
+              # what writing a "no pitch" region back to the config produces -
+              # skips the default and hands None to the arithmetic below.
+              "pitch": r.get("row_pitch") or 20,
+              "row_h": r.get("row_height") or (r.get("row_pitch") or 20) - 2,
               "key_width": r.get("key_width"),
               "label_width": r.get("label_width"),
               "columns": r.get("columns") or None,
