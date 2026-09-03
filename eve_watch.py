@@ -71,6 +71,7 @@ PAUSEFILE = os.path.join(HERE, "PAUSED")   # exists = the running watcher idles
 CLIPFILE  = os.path.join(HERE, "CLIPBOARD_OWNER")  # which watcher reads Ctrl+C
 PILOTS    = os.path.join(HERE, "pilots.json")      # who has been seen, in what
 MARKS     = os.path.join(HERE, "pilot_marks.log")  # corrections from the viewer
+SIGFILE   = os.path.join(HERE, "signatures.json")  # which sigs are scanned
 
 
 def pause_path(client=None):
@@ -831,6 +832,126 @@ def read_marks(since=0.0):
     return out
 
 
+# What EVE puts in the Group column once a signature resolves. Until then the
+# Name column reads "Cosmic Signature" (or Anomaly) and Group is empty, which
+# is exactly the distinction between scanned and not.
+SITE_TYPES = ("Data Site", "Relic Site", "Gas Site", "Combat Site",
+              "Wormhole", "Ore Site", "Ghost Site")
+UNRESOLVED = ("cosmic signature", "cosmic anomaly")
+
+
+def classify_sig(name, group):
+    """(type, site_name, scanned) from the Name and Group columns.
+
+    Scanned is not a flag EVE shows; it is the absence of "Cosmic Signature".
+    A signature below the resolving threshold has an empty Group and a Name of
+    "Cosmic Signature"; once probed the Group names the type, and at full
+    strength the Name becomes the site's own.
+    """
+    name = clean_field(name)
+    group = clean_field(group)
+    kind = ""
+    for want in SITE_TYPES:
+        if group and difflib.SequenceMatcher(
+                None, group.casefold(), want.casefold()).ratio() >= 0.75:
+            kind = want
+            break
+    low = name.casefold()
+    generic = any(difflib.SequenceMatcher(None, low, u).ratio() >= 0.6
+                  or low.startswith(u[:6]) for u in UNRESOLVED)
+    site = "" if generic or not name else name
+    return kind, site, bool(kind or site)
+
+
+# A signature id is three letters, a dash and three digits - always. Knowing
+# the shape means a misread can be repaired rather than discarded: the glyphs
+# OCR confuses are known, and which side of the dash a character sits on says
+# whether it must be a letter or a digit.
+_AS_DIGIT = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "|": "1",
+             "S": "5", "B": "8", "Z": "2", "G": "6", "T": "7", "A": "4",
+             "Ø": "0", "ø": "0"}   # EVE slashes its zero
+_AS_LETTER = {"0": "O", "1": "I", "5": "S", "8": "B", "2": "Z", "6": "G"}
+
+
+def repair_sig_id(raw, known=()):
+    """A signature id from a wobbly reading, or "" if it cannot be made into one.
+
+    Two steps. Fix characters that sit on the wrong side of the dash - "PTG-6O4"
+    is a zero, not a letter O. Then, for a reading cut short, adopt a stored id
+    it uniquely prefixes: "EMT-6" can only be "EMT-600" if that is the only
+    match, and ids are unique enough that a five-character prefix decides it.
+    """
+    t = normalise_glyphs(clean_field(raw) or "").upper().replace(" ", "")
+    for dash in ("—", "–", "¯", "_", "~"):
+        t = t.replace(dash, "-")
+    if "-" not in t and len(t) >= 4:
+        t = t[:3] + "-" + t[3:]
+    head, _, tail = t.partition("-")
+    head = "".join(_AS_LETTER.get(c, c) for c in head)[:3]
+    tail = "".join(_AS_DIGIT.get(c, c) for c in tail)[:3]
+    cand = f"{head}-{tail}"
+    if SIG_ID.match(cand):
+        return cand
+    if len(cand) >= 5:
+        hits = [k for k in known if k.startswith(cand)]
+        if len(hits) == 1:
+            return hits[0]
+    return ""
+
+
+def load_sigs():
+    try:
+        with open(SIGFILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_sigs(book):
+    tmp = SIGFILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(book, fh, indent=1, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, SIGFILE)
+    except OSError as exc:
+        log(f"  signatures.json write failed: {exc}")
+
+
+def note_sig(book, sid, kind, site, client, when=None, exact=False):
+    """Fold one signature sighting in. Returns True if anything changed.
+
+    Never downgrades: a signature seen resolved and later read as a bare
+    "Cosmic Signature" - because OCR missed the Group column, or because the
+    row scrolled - keeps what it had. Scanning only goes one way in a session,
+    and the point of the file is to still know it after a relog.
+    """
+    if not SIG_ID.match(sid or ""):
+        return False
+    when = when or dt.datetime.now().isoformat(timespec="seconds")
+    rec = book.setdefault(sid, {"id": sid, "type": "", "name": "",
+                                "scanned": False, "first_seen": when,
+                                "clients": []})
+    changed = False
+    if kind and (kind != rec["type"] or (exact and not rec.get("exact"))):
+        rec["type"] = kind
+        changed = True
+    if site and site != rec["name"]:
+        rec["name"] = site
+        changed = True
+    if (kind or site) and not rec["scanned"]:
+        rec["scanned"] = True
+        changed = True
+    if exact:
+        rec["exact"] = True
+    if client and client not in rec["clients"]:
+        rec["clients"].append(client)
+        changed = True
+    rec["last_seen"] = when
+    return changed
+
+
 def load_pilots():
     try:
         with open(PILOTS, "r", encoding="utf-8") as fh:
@@ -1372,6 +1493,37 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
 
 
 SIG_LINE = re.compile(r"^([A-Z]{3}-\d{3})\t([^\t\n]*)\t?([^\t\n]*)", re.M)
+SIG_ID   = re.compile(r"^[A-Z]{3}-\d{3}$")
+SIG_ROW  = re.compile(r"^([A-Z]{3}-\d{3})\t(.*)$", re.M)
+
+
+def parse_signature_rows(text):
+    """Signatures from an EVE probe-scanner copy, split into fields.
+
+    The paste is exact where OCR is not, so it is the better source when
+    it is available. Fields are matched by CONTENT rather than position:
+    the one naming a site type is the type, the one saying "Cosmic
+    Signature" is the group, and what is left is the site name. That
+    survives a column being reordered or hidden in the scanner.
+    """
+    out = {}
+    for sid, rest in SIG_ROW.findall(text or ""):
+        cells = [c.strip() for c in rest.split("\t")]
+        kind, site = "", ""
+        for cell in cells:
+            if not cell or "%" in cell or cell.lower().endswith(("au", "km", "m")):
+                continue
+            k, n, _ = classify_sig("", cell)
+            if k and not kind:
+                kind = k
+                continue
+            low = cell.casefold()
+            if any(low.startswith(u[:6]) for u in UNRESOLVED):
+                continue                # the group, nothing to learn
+            if not site and not k:
+                site = cell
+        out[sid] = {"type": kind, "name": site}
+    return out
 
 
 def read_mode(default="away"):
@@ -2004,7 +2156,7 @@ PANELS = [
      "say": "new contact in {label}", "ignore": ["Sun", "Fortizar"]},
     {"kind": "sigs", "title": ["probe", "scanner"], "mode": "roster",
      "headers": ["distance", "id", "name", "group", "signal"],
-     "id_upto": "name", "id_from": "id",
+     "id_upto": "name", "id_from": "id", "id_column": "id",
      # Signal strength counts up while probes resolve, so it churns every label
      # it appears in - and it says nothing about WHICH signature the row is.
      "label_upto": "signal",
@@ -2277,12 +2429,21 @@ def panel_geometry(panel, words, bounds, frame=None, threshold=110):
                          f"and re-run."}
     if first_row < floor_y:
         first_row = floor_y
+
+    cols = {k: v["x"] for k, v in header.items()}
+    # The probe scanner's first column carries no header - the row above reads
+    # "Name", "Group", "Signal" and nothing over the ids - so nothing recorded
+    # where the ids begin, and they were filed under whichever column happened
+    # to sit leftmost. The box starts at that column by construction.
+    if spec.get("id_column") and spec["id_column"] not in cols:
+        cols[spec["id_column"]] = box_left
+
     return {"header_y": header_y, "first_row": first_row, "pitch": pitch,
             "text_h": text_h, "borrowable": borrowable,
             "measured_pitch": measured, "box_left": box_left,
             "box_right": min(x_hi, right_edge + 6), "key_width": key_width,
             "label_width": label_width,
-            "columns": {k: v["x"] for k, v in header.items()}}
+            "columns": cols}
 
 
 def known_pitch(cfg, kind, win_w, win_h, text_h=None, window=None):
@@ -3333,8 +3494,10 @@ def cmd_events(args):
     nb.pack(fill="both", expand=True)
     tab_ev = tk.Frame(nb, padx=6, pady=6)
     tab_pl = tk.Frame(nb, padx=6, pady=6)
+    tab_sg = tk.Frame(nb, padx=6, pady=6)
     nb.add(tab_ev, text="Events")
     nb.add(tab_pl, text="Pilots")
+    nb.add(tab_sg, text="Signatures")
 
     top = tk.Frame(tab_ev)
     top.pack(fill="x")
@@ -3485,6 +3648,62 @@ def cmd_events(args):
 
     pent.bind("<KeyRelease>", lambda e: pilots_refresh(force=True))
     pilots_refresh(force=True)
+
+    # ---- Signatures tab: what is scanned and what is not ------------------
+    stop_ = tk.Frame(tab_sg)
+    stop_.pack(fill="x")
+    only_new = tk.IntVar(value=0)
+    tk.Checkbutton(stop_, text="not yet scanned only", variable=only_new,
+                   command=lambda: sigs_refresh(force=True)).pack(side="left")
+    scount = tk.Label(stop_, text="", font=("Segoe UI", 9), fg="#666")
+    scount.pack(side="left", padx=(12, 0))
+
+    scols = ("id", "scanned", "type", "site name", "first seen", "last seen",
+             "seen by")
+    stree = ttk.Treeview(tab_sg, columns=scols, show="headings", height=24)
+    for c, w in zip(scols, (95, 75, 105, 260, 125, 125, 105)):
+        stree.heading(c, text=c)
+        stree.column(c, width=w, anchor="w")
+    stree.tag_configure("todo", foreground="#c22")
+    ssb = ttk.Scrollbar(tab_sg, orient="vertical", command=stree.yview)
+    stree.configure(yscrollcommand=ssb.set)
+    stree.pack(side="left", fill="both", expand=True, pady=(8, 0))
+    ssb.pack(side="right", fill="y", pady=(8, 0))
+    sstate = {"mtime": None}
+
+    def sigs_refresh(force=False):
+        try:
+            stamp = os.path.getmtime(SIGFILE)
+        except OSError:
+            stamp = None
+        if not force and stamp == sstate["mtime"]:
+            return
+        sstate["mtime"] = stamp
+        book = load_sigs()
+        stree.delete(*stree.get_children())
+        # unscanned first, then most recently seen: the list is a to-do list
+        rows = sorted(book.values(),
+                      key=lambda v: (v.get("scanned", False),
+                                     v.get("last_seen", "")), reverse=False)
+        rows = [r for r in rows if not r.get("scanned")] +                sorted([r for r in rows if r.get("scanned")],
+                      key=lambda v: v.get("id", ""))
+        shown = 0
+        for rec in rows:
+            if only_new.get() and rec.get("scanned"):
+                continue
+            stree.insert("", "end",
+                         tags=(() if rec.get("scanned") else ("todo",)),
+                         values=(rec.get("id", ""),
+                                 "yes" if rec.get("scanned") else "NOT YET",
+                                 rec.get("type", ""), rec.get("name", ""),
+                                 (rec.get("first_seen") or "")[:16].replace("T", " "),
+                                 (rec.get("last_seen") or "")[:16].replace("T", " "),
+                                 ", ".join(rec.get("clients", []))))
+            shown += 1
+        todo = sum(1 for r in book.values() if not r.get("scanned"))
+        scount.configure(text=f"{shown} shown - {todo} of {len(book)} still to scan")
+
+    sigs_refresh(force=True)
     shots = {}
     seen = {"sig": None}
 
@@ -3552,6 +3771,7 @@ def cmd_events(args):
         the difference between waiting and knowing."""
         refresh(force=force)
         pilots_refresh(force=force)
+        sigs_refresh(force=force)
 
     def tick():
         both()
@@ -4432,6 +4652,7 @@ def cmd_watch(args):
         if alarm:
             raise_alarm(phrase or st["say"], f"{name}: {detail}\n\n{shot}", args)
 
+    sigs_book, sigs_dirty = load_sigs(), False
     book, book_dirty, book_saved = load_pilots(), False, time.time()
     # Anything newer than the book's last save has not been folded in yet -
     # including a mark written while the watchers were down, which starting
@@ -4560,6 +4781,27 @@ def cmd_watch(args):
                 f"the overview change)")
             record_event(started, "structure", verb, f"{name}{in_what}",
                          obs_dir=obs_dir)
+
+    def record_sigs(st, frame, box, s):
+        """Fold the probe scanner's rows into the signature file.
+
+        Kept because it has to outlive the session: after downtime or a relog
+        the question is which of these were already scanned, and EVE does not
+        remember either.
+        """
+        nonlocal sigs_dirty
+        for y, f in field_samples(frame, box, s["ocr_scale"], st["columns"]).items():
+            if y < 0:
+                continue
+            sid = repair_sig_id(f.get("id"), sigs_book)
+            if not sid:
+                continue                # not a signature row, or unreadable
+            kind, site, _ = classify_sig(f.get("name"), f.get("group"))
+            if note_sig(sigs_book, sid, kind, site, TAG):
+                sigs_dirty = True
+                log(f"   sig {sid}: "
+                    + (f"{kind}{' - ' + site if site else ''}" if kind or site
+                       else "seen, not yet scanned"))
 
     def record_pilots(st, frame, box, s):
         """Fold every visible overview row into the pilot book.
@@ -4880,6 +5122,14 @@ def cmd_watch(args):
                             if arrived or departed or now - st.get("pilots_at", 0) >= 25:
                                 st["pilots_at"] = now
                                 record_pilots(st, frame, box, s)
+                        elif st["columns"] and name.startswith("sigs"):
+                            # Same gate as the pilots: read when the list moved,
+                            # and otherwise now and then, because a signature
+                            # resolving changes the Group column without adding
+                            # or removing a row.
+                            if arrived or departed or now - st.get("sigs_at", 0) >= 20:
+                                st["sigs_at"] = now
+                                record_sigs(st, frame, box, s)
                         for gone in departed:
                             log(f"   {name}: left - {gone}")
                             record_event(started, name, "depart", gone,
@@ -5036,6 +5286,11 @@ def cmd_watch(args):
                         record_event(started, "clipboard", "sigs",
                                      f"{len(sigs)} total: " + ", ".join(sorted(sigs)),
                                      obs_dir=obs_dir)
+                        exact = parse_signature_rows(read_clipboard() or "")
+                        for sid, info in exact.items():
+                            if note_sig(sigs_book, sid, info["type"],
+                                        info["name"], TAG, exact=True):
+                                sigs_dirty = True
                         if fresh:
                             detail = " | ".join(fresh[k] for k in sorted(fresh))
                             log(f"*** NEW SIGNATURE(S): {detail}")
@@ -5074,6 +5329,10 @@ def cmd_watch(args):
                         book.pop(resolve_key(book, key), None)
                     log(f"   pilot mark applied: {what} {key!r}")
                     book_dirty = True
+
+            if sigs_dirty:
+                save_sigs(sigs_book)
+                sigs_dirty = False
 
             if book_dirty and time.time() - book_saved > 20:
                 # Someone editing the file while a watcher runs would otherwise

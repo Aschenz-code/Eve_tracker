@@ -139,6 +139,17 @@ unknown. A running watcher picks up new values within seconds.
 - `events.csv` — one row per event: time, client, region, event, detail, snapshot.
 - `snapshots/events/` — a PNG saved at the moment of each alert.
 - `snapshots/baseline/` — what each region saw at startup, for checking aim.
+- `signatures.json` — every signature id seen, with its type and site name once
+  known, and whether it has been scanned. Browse it in the **Signatures** tab of
+  events.bat, which lists the unscanned ones first and in red. It is kept on
+  disk on purpose: after downtime or a relog the question is which of these you
+  had already scanned, and EVE does not remember either.
+
+  Scanned is not a flag the game shows - it is the absence of one. An unresolved
+  signature has an empty Group column and a Name of "Cosmic Signature"; once
+  probed the Group names the type, and at full strength the Name becomes the
+  site's own. A pasted scan (Ctrl+C in the probe scanner) is exact and is
+  preferred over OCR when it arrives.
 - `pilots.json` — every name seen in an overview, with the ships they have
   flown, their corp tickers, when they were first and last seen, whether they
   were last coming or going, which client saw them last, and what happened the
