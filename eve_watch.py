@@ -1384,7 +1384,7 @@ def reportable(label, settings, require=None):
 
 
 def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
-                     allow_depart=True):
+                     allow_depart=True, id_fn=None):
     """Identify list rows by pixel bitmap rather than by OCR'd text.
 
     Measured live on the probe scanner: the same signature row scores >= 0.9994
@@ -1467,6 +1467,27 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
             if k in used:
                 continue
             st["rows"][k]["misses"] += 1
+            if st["rows"][k]["misses"] >= need and id_fn and st["rows"][k].get("uid"):
+                # Pixels are not the only identity available. A signature row
+                # carries a unique id, and hovering or selecting a row changed
+                # it enough to score 0.77 where the bar is 0.95 - well above
+                # the 0.65 two different rows reach, but not enough to match.
+                # If the id is still on screen the row never left: re-bind it
+                # to where it now is and carry on.
+                want = st["rows"][k]["uid"]
+                for se, ex, cell in occupied:
+                    if id_fn(cell) != want:
+                        continue
+                    st["rows"][k]["bitmap"] = ex
+                    st["rows"][k]["misses"] = 0
+                    st["rows"][k]["text"] = label_fn(cell) or st["rows"][k]["text"]
+                    used.add(k)
+                    break
+                else:
+                    st["rows"][k]["misses"] = need      # fall through below
+                if st["rows"][k]["misses"] == 0:
+                    continue
+
             if st["rows"][k]["misses"] >= need:
                 gone = st["rows"].pop(k)
                 text = gone["text"]
@@ -1493,8 +1514,9 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
         label = st["pending"][prev][1] if prev is not None else label_fn(cell)
         if hits >= need:
             st["next_id"] += 1
-            st["rows"][f"px{st['next_id']}"] = {"bitmap": exact, "text": label,
-                                                "misses": 0}
+            st["rows"][f"px{st['next_id']}"] = {
+                "bitmap": exact, "text": label, "misses": 0,
+                "uid": id_fn(cell) if id_fn else ""}
             # Track it either way so it is not re-reported, but stay silent for
             # permanent scenery and for rows that cannot be what this list holds.
             if reportable(label, settings, st.get("require")):
@@ -5127,8 +5149,16 @@ def cmd_watch(args):
                     if st["identity"] == "pixels":
                         _label = label_by_row(frame, box, s["ocr_scale"],
                                               st["pitch"], st["label_width"])
+                        # Signature rows carry a unique id, so give the
+                        # matcher a second opinion for them: pixels decide
+                        # normally, and the id settles a row that changed
+                        # appearance rather than actually leaving.
+                        _idf = None
+                        if name.startswith("sigs") and st["columns"]:
+                            def _idf(cell, _st=st, _lab=_label):
+                                return repair_sig_id(_lab(cell), sigs_book)
                         arrived, departed = reconcile_pixels(
-                            st, frame, box, thr, st["cfg"], _label)
+                            st, frame, box, thr, st["cfg"], _label, id_fn=_idf)
                         # Three OCR passes at 313ms, and on a quiet grid they
                         # re-read text that has not changed. Run them when the
                         # roster actually moved, and otherwise only often enough
