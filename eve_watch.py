@@ -5065,6 +5065,26 @@ def cmd_watch(args):
             # survives a restart - which is what kept a pilot read correctly
             # twice out of the book, because the watcher was restarted between
             # the two sightings and the tally started again.
+            # What they are in NOW, and where, are facts about this moment and
+            # must not wait for corroboration. Meki Raz undocked in a Buzzard
+            # and the Pilots tab showed no ship at all, because the hull was a
+            # first sighting and the "now" fields sat below the gate - along
+            # with the distance the wormhole check needs. Corroboration is
+            # there to protect the HISTORY from a bad reading, and the pilot is
+            # already known; only the hull is uncertain, and this is the field
+            # that answers what is out there right now.
+            far = parse_distance(f.get("distance"))
+            if far is not None:
+                seen_at = st["last_dist"].setdefault(key, [])
+                seen_at.append(far)
+                del seen_at[:-3]        # only the last few matter
+            entry = book.get(key)
+            if entry is not None and ship:
+                entry["now_ship"] = ship
+                entry["now_by"] = TAG
+                entry["now_at"] = dt.datetime.now().isoformat(timespec="seconds")
+                book_dirty = True
+
             votes = f.get("_votes") or {}
             agreed = (votes.get("name", {}).get(who, 0) >= 2
                       and votes.get("type", {}).get(ship, 0) >= 2)
@@ -5072,11 +5092,6 @@ def cmd_watch(args):
             st["pilot_reads"][token] = st["pilot_reads"].get(token, 0) + 1
             if not agreed and st["pilot_reads"][token] < 2:
                 continue
-            far = parse_distance(f.get("distance"))
-            if far is not None:
-                seen_at = st["last_dist"].setdefault(key, [])
-                seen_at.append(far)
-                del seen_at[:-3]        # only the last few matter
             # A visit, not a poll: the roster is re-read every few seconds, so
             # counting every pass measured how long the client was open rather
             # than how often this pilot was actually seen.
@@ -5084,15 +5099,6 @@ def cmd_watch(args):
                           visit=key not in st["pilots_seen"]):
                 book_dirty = True
             # What they are in NOW, as opposed to the tally of everything they
-            # have ever flown. Stamped every pass so a watcher that dies cannot
-            # leave someone looking like they are still on grid - the reader
-            # decides how fresh is fresh.
-            entry = book.get(key)
-            if entry is not None:
-                entry["now_ship"] = ship
-                entry["now_by"] = TAG
-                entry["now_at"] = dt.datetime.now().isoformat(timespec="seconds")
-                book_dirty = True
         st["arrived_names"] = []
         for key in here - st["pilots_seen"]:
             entry = book.get(key)
