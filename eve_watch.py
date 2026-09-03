@@ -2716,7 +2716,15 @@ def cmd_calibrate(args):
         if spec["mode"] == "roster":
             region.update(identity="pixels", row_pitch=geo["pitch"],
                           row_height=max(8, geo["pitch"] - 2), row_offset=8,
-                          pix_ncc=0.95, pix_min_lit=20)
+                          # 0.95 was far tighter than the data supports. Two
+                          # different rows reach 0.64 on a probe scanner and
+                          # about 0.71 on an overview, while a row that is
+                          # merely hovered or selected scores 0.77-0.94 - so a
+                          # bar of 0.95 called those departures. Signature rows
+                          # have the id as a second opinion below the bar;
+                          # overview rows have none, so they keep more room.
+                          pix_ncc=0.80 if p["spec"]["kind"] == "sigs" else 0.85,
+                          pix_min_lit=20)
         regions.append(region)
         report.append((p["label"],
                        f"box {region['target']['width']}x{region['target']['height']} "

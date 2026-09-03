@@ -181,6 +181,12 @@ Common causes:
 - **You changed EVE's UI scale.** Anchors and taught values are fixed-size
   bitmaps; they all break. Re-calibrate, and re-teach any counter values.
 - **You resized the EVE window.** Same fix.
+- **You hovered or selected a row.** Handled: it changes the row enough to
+  score 0.77-0.94 against its stored image, where two genuinely different rows
+  reach only about 0.64, so the match bar sits at 0.80 for signatures and 0.85
+  for overviews. Signature rows also carry a unique id, which settles anything
+  in between. If false arrivals ever return, `pix_ncc` on that region is the
+  number to lower - the log prints the score it needed.
 - **You moved a panel a long way.** Regions refuse to follow further than
   `max_drift` (200 px), because two overview panels look identical to the matcher
   and it must not lock onto the wrong one. Re-calibrate.
