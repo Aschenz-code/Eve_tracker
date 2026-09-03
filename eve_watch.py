@@ -46,6 +46,7 @@ import difflib
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import statistics
@@ -1792,43 +1793,136 @@ def post_webhook(url, text):
         log(f"  webhook failed: {exc}")
 
 
-def raise_alarm(phrase, body, opts, attribute=True):
-    """Beep instantly, then nag by voice until the popup is acknowledged.
+_alerts = queue.Queue()
+_alert_worker = None
+ALERT_HOLD = 0.8            # seconds spent gathering before anything is said
 
-    With several clients watched at once the first thing you need to know is
-    WHICH one to switch to, so the client leads both the spoken alert and the
-    popup rather than being buried in the log.
+
+def speech_gate(seconds=8.0):
+    """A machine-wide turn to speak, so two watchers do not talk over each other.
+
+    A named mutex, because the OS releases it if a watcher dies - a lock file
+    would need stale detection and would silence everything if one leaked.
+    Returns a release callable, or None if the wait ran out, in which case
+    speak anyway: a late alert overlapping beats a dropped one.
     """
-    if TAG and attribute:
-        phrase = f"{TAG}. {phrase}"
-        body = f"Client: {TAG}\n\n{body}"
+    try:
+        k = ctypes.windll.kernel32
+        h = k.CreateMutexW(None, False, "eve_watch_speech_gate")
+        if not h:
+            return lambda: None
+        if k.WaitForSingleObject(h, int(seconds * 1000)) not in (0, 128):
+            return None
+
+        def release():
+            try:
+                k.ReleaseMutex(h)
+                k.CloseHandle(h)
+            except Exception:
+                pass
+        return release
+    except Exception:
+        return lambda: None
+
+
+def _say_batch(batch):
+    """Announce one gathered batch as a single alert."""
+    opts = batch[-1][2]
+    tag = f"{TAG}. " if TAG and batch[0][3] else ""
+    items = [raw for raw, _body, _o, _a in batch]
+    if len(items) == 1:
+        phrase = tag + items[0]
+    else:
+        # Group by what each alert is ABOUT, so three arrivals read as one
+        # sentence listing three names rather than repeating "new contact in
+        # the overview" three times over.
+        groups, order = {}, []
+        for raw in items:
+            head, _, tail = raw.partition(". ")
+            if not tail:
+                head, tail = "", raw
+            if head not in groups:
+                groups[head] = []
+                order.append(head)
+            groups[head].append(tail)
+        parts = []
+        for head in order:
+            found = groups[head]
+            shown = ", ".join(found[:3])
+            if len(found) > 3:
+                shown += f", and {len(found) - 3} more"
+            parts.append(f"{head}. {shown}" if head else shown)
+        phrase = f"{tag}{len(items)} changes. " + "; ".join(parts)
+
     title = f"EVE watch - {TAG}" if TAG else "EVE watch"
     if opts.popup:
+        body = ("\n\n").join(b for _r, b, _o, _a in batch)
+        if TAG:
+            body = f"Client: {TAG}\n\n{body}"
         threading.Thread(target=popup, args=(title, body), daemon=True).start()
 
     if not getattr(opts, "beeps", True) and not opts.popup and not opts.voice:
         return                      # --quiet: log and snapshot, make no noise
 
-    def nag():
-        cycles = 0
-        while cycles < 60:
-            if getattr(opts, "beeps", True):
-                beep(2, opts.sound)
-            if opts.voice:
+    cycles = 0
+    while cycles < 60:
+        if getattr(opts, "beeps", True):
+            beep(2, opts.sound)
+        if opts.voice:
+            release = speech_gate()
+            try:
                 speak(phrase)
-            cycles += 1
-            nagging = getattr(opts, "nag_until_ack", False) and opts.popup
-            if cycles >= opts.repeat and not (nagging and _popup_busy.is_set()):
-                break
-            time.sleep(0.6)
+            finally:
+                if release:
+                    release()
+        cycles += 1
+        nagging = getattr(opts, "nag_until_ack", False) and opts.popup
+        if cycles >= opts.repeat and not (nagging and _popup_busy.is_set()):
+            break
+        time.sleep(0.6)
 
-    threading.Thread(target=nag, daemon=True).start()
     if opts.webhook:
-        threading.Thread(target=post_webhook, args=(opts.webhook, f"**EVE watch** - {phrase}"),
+        threading.Thread(target=post_webhook,
+                         args=(opts.webhook, f"**EVE watch** - {phrase}"),
                          daemon=True).start()
 
 
-# ------------------------------------------------------------- select UI ----
+def _alert_loop():
+    """One announcer. Everything queues behind it, so nothing overlaps."""
+    while True:
+        try:
+            batch = [_alerts.get()]
+            end = time.time() + ALERT_HOLD
+            while True:
+                left = end - time.time()
+                if left <= 0:
+                    break
+                try:
+                    batch.append(_alerts.get(timeout=left))
+                except queue.Empty:
+                    break
+            _say_batch(batch)
+        except Exception as exc:        # an announcer that dies goes silent
+            log(f"  alert failed: {exc}")
+
+
+def raise_alarm(phrase, body, opts, attribute=True):
+    """Queue an alert. One announcer speaks them, gathering what arrives close
+    together into a single announcement.
+
+    Each alert used to start its own thread, so two arrivals a second apart
+    talked over each other and a busy grid was unintelligible. Holding briefly
+    costs less than that: nothing is dropped, and what changed is read out as
+    one list.
+
+    With several clients watched the first thing you need to know is WHICH one
+    to switch to, so the client still leads.
+    """
+    global _alert_worker
+    if _alert_worker is None:
+        _alert_worker = threading.Thread(target=_alert_loop, daemon=True)
+        _alert_worker.start()
+    _alerts.put((phrase, body, opts, attribute))
 
 def drag_box(pil_img, caption, optional=False):
     """Show an image, let the user drag a box; return (l, t, w, h) in image px."""
