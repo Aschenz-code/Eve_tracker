@@ -84,9 +84,18 @@ default. `client_interval` overrides it per client:
 
 Worth doing on a client watching a structure, where catching someone in the
 seconds before they can cloak decides whether a dock is attributed to a name.
-Measured on one machine, halving it cost two percentage points of a core -
-the standing cost is the periodic OCR, which is gated by `roster_period` and
-does not follow the poll rate.
+
+Measured on one machine, one watcher, four regions:
+
+| interval | that watcher | worst-case detection |
+|---|---|---|
+| 1.0 s | 24% of a core | ~2 s |
+| 0.5 s | 24% | ~1 s |
+| 0.25 s | 35% | ~0.5 s |
+
+Halving from 1 s is nearly free because the standing cost is the periodic OCR,
+which `roster_period` gates and which does not follow the poll rate. Below that
+the per-pass work starts to show.
 
 ## Docking
 
