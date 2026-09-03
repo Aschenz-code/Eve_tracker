@@ -2183,7 +2183,7 @@ def panel_geometry(panel, words, bounds, frame=None, threshold=110):
             "columns": {k: v["x"] for k, v in header.items()}}
 
 
-def known_pitch(cfg, kind, win_w, win_h, text_h=None):
+def known_pitch(cfg, kind, win_w, win_h, text_h=None, window=None):
     """A row pitch already measured for this kind of panel at this window size.
 
     A list with fewer than two rows cannot reveal its own spacing, but the same
@@ -2207,6 +2207,19 @@ def known_pitch(cfg, kind, win_w, win_h, text_h=None):
     for r in candidates:
         if not r.get("text_h"):
             return r["row_pitch"]
+
+    # Failing a donor of the same kind, take one from ANY list on this client.
+    # Row spacing follows the UI scale, which is a property of the client and
+    # not of the panel - measured on one client, an overview and a probe
+    # scanner both came to exactly 22. Restricting the donor by kind meant an
+    # overview calibrated on an empty grid guessed 18, 20 or 24 while the
+    # scanner beside it had the answer, and being a couple of pixels out
+    # compounds down the list until the rows stop lining up at all.
+    if window and text_h:
+        for r in cfg.get("regions", []):
+            if (r.get("window") == window and r.get("row_pitch")
+                    and r.get("text_h") and abs(r["text_h"] - text_h) <= 1):
+                return r["row_pitch"]
     return None
 
 
@@ -2342,7 +2355,8 @@ def cmd_calibrate(args):
         if (geo and "error" not in geo and not geo["measured_pitch"]
                 and geo.get("borrowable", True)):
             borrowed = known_pitch(cfg, p["spec"]["kind"], fw, fh,
-                                   geo.get("text_h"))
+                                   text_h=geo.get("text_h"),
+                                   window=win["title"])
             if borrowed:
                 geo["pitch"] = borrowed
                 geo["borrowed_pitch"] = True
