@@ -1446,6 +1446,25 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
                          cut(cell["left"], cell["top"],
                              cell["width"], cell["height"]), cell))
 
+    # A list that has just lost most of its rows is being redrawn, not
+    # emptied. Re-scanning clears the probe scanner for a pass or two, and
+    # acting on that reported every row as gone and then back again - 74 log
+    # lines from one scan. Wait it out; if the rows really have gone they will
+    # still be missing in a moment.
+    # Timed, not counted: the poll interval differs per client - 0.25s on one
+    # and 1.0s on another - so a fixed number of passes would give one client
+    # a quarter of the tolerance of the other for the same redraw.
+    tracked = len(st["rows"])
+    if tracked >= 3 and len(occupied) * 2 < tracked:
+        since = st.get("collapsed_at")
+        if since is None:
+            st["collapsed_at"] = time.time()
+            return [], []
+        if time.time() - since <= 4.0:
+            return [], []
+    else:
+        st["collapsed_at"] = None
+
     used, fresh = set(), []
     for search, exact, cell in occupied:
         best_k, best_s = None, -2.0
