@@ -948,6 +948,9 @@ def note_sig(book, sid, kind, site, client, when=None, exact=False):
     if client and client not in rec["clients"]:
         rec["clients"].append(client)
         changed = True
+    if not rec.get("present"):
+        rec["present"] = True
+        changed = True
     rec["last_seen"] = when
     return changed
 
@@ -1031,8 +1034,13 @@ NAME_OK = re.compile(r"^[0-9A-Za-z' -]+$")
 
 # Things the overview lists that are not people. The first word is enough, and
 # it is matched loosely because OCR damages these as readily as anything else.
+# "probe" and "drone" are here because a deployable is not a pilot, and
+# leaving that to a per-region ignore list was not enough: a recalibration
+# rewrites those lists, and a scanner probe walked back into the pilot book
+# the moment one did.
 SCENERY = ("wormhole", "asteroid", "beacon", "moon", "planet", "star",
-           "stargate", "station", "customs", "gate", "cloud", "container")
+           "stargate", "station", "customs", "gate", "cloud", "container",
+           "probe", "drone", "wreck", "cargo")
 
 
 def is_environment(name, ship):
@@ -1061,6 +1069,13 @@ def is_environment(name, ship):
     if any(looks_like(head, term, 0.72) for term in SCENERY):
         if difflib.SequenceMatcher(None, head, tail).ratio() >= 0.6:
             return True
+    # A deployable names itself in either column - "Scanner Probe" against a
+    # type of "Sisters Combat" shares no word, so the pair test above misses
+    # it. Any word of the name matching the vocabulary is enough here, because
+    # no ship type and no character name contains one.
+    if any(looks_like(w, term, 0.85)
+           for w in a.split() + b.split() for term in ("probe", "drone")):
+        return True
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.7
 
 
@@ -3728,16 +3743,21 @@ def cmd_events(args):
     only_new = tk.IntVar(value=0)
     tk.Checkbutton(stop_, text="not yet scanned only", variable=only_new,
                    command=lambda: sigs_refresh(force=True)).pack(side="left")
+    show_gone = tk.IntVar(value=0)
+    tk.Checkbutton(stop_, text="include ones that are gone", variable=show_gone,
+                   command=lambda: sigs_refresh(force=True)).pack(side="left",
+                                                                  padx=(12, 0))
     scount = tk.Label(stop_, text="", font=("Segoe UI", 9), fg="#666")
     scount.pack(side="left", padx=(12, 0))
 
-    scols = ("id", "scanned", "type", "site name", "first seen", "last seen",
-             "seen by")
+    scols = ("id", "here", "scanned", "type", "site name", "first seen",
+             "last seen", "seen by")
     stree = ttk.Treeview(tab_sg, columns=scols, show="headings", height=24)
-    for c, w in zip(scols, (95, 75, 105, 260, 125, 125, 105)):
+    for c, w in zip(scols, (90, 55, 70, 100, 235, 120, 120, 95)):
         stree.heading(c, text=c)
         stree.column(c, width=w, anchor="w")
     stree.tag_configure("todo", foreground="#c22")
+    stree.tag_configure("gone", foreground="#999")
     ssb = ttk.Scrollbar(tab_sg, orient="vertical", command=stree.yview)
     stree.configure(yscrollcommand=ssb.set)
     stree.pack(side="left", fill="both", expand=True, pady=(8, 0))
@@ -3762,19 +3782,28 @@ def cmd_events(args):
                       key=lambda v: v.get("id", ""))
         shown = 0
         for rec in rows:
+            here = rec.get("present", True)
+            if not here and not show_gone.get():
+                continue
             if only_new.get() and rec.get("scanned"):
                 continue
-            stree.insert("", "end",
-                         tags=(() if rec.get("scanned") else ("todo",)),
+            tag = () if not here else (() if rec.get("scanned") else ("todo",))
+            if not here:
+                tag = ("gone",)
+            stree.insert("", "end", tags=tag,
                          values=(rec.get("id", ""),
+                                 "yes" if here else "gone",
                                  "yes" if rec.get("scanned") else "NOT YET",
                                  rec.get("type", ""), rec.get("name", ""),
                                  (rec.get("first_seen") or "")[:16].replace("T", " "),
                                  (rec.get("last_seen") or "")[:16].replace("T", " "),
                                  ", ".join(rec.get("clients", []))))
             shown += 1
-        todo = sum(1 for r in book.values() if not r.get("scanned"))
-        scount.configure(text=f"{shown} shown - {todo} of {len(book)} still to scan")
+        # the count is about what is still out there, not the whole history
+        here_now = [r for r in book.values() if r.get("present", True)]
+        todo = sum(1 for r in here_now if not r.get("scanned"))
+        scount.configure(text=f"{shown} shown - {todo} of {len(here_now)} here "
+                              f"still to scan ({len(book)} known)")
 
     sigs_refresh(force=True)
     shots = {}
@@ -4726,7 +4755,7 @@ def cmd_watch(args):
         if alarm:
             raise_alarm(phrase or st["say"], f"{name}: {detail}\n\n{shot}", args)
 
-    sigs_book, sigs_dirty = load_sigs(), False
+    sigs_book, sigs_dirty, sigs_saved = load_sigs(), False, time.time()
     book, book_dirty, book_saved = load_pilots(), False, time.time()
     # Anything newer than the book's last save has not been folded in yet -
     # including a mark written while the watchers were down, which starting
@@ -4856,6 +4885,28 @@ def cmd_watch(args):
             record_event(started, "structure", verb, f"{name}{in_what}",
                          obs_dir=obs_dir)
 
+    def retire_sigs(now_iso):
+        """Mark signatures that have stopped appearing.
+
+        Nothing removed them before, so one that despawned, was finished, or
+        belonged to a system you left sat in the list for good and the "still
+        to scan" count was wrong. Marked rather than deleted: the record is the
+        point, and that a signature WAS here is worth keeping.
+
+        Three minutes, far longer than the moment the list is blank while
+        re-scanning, so a redraw cannot retire anything.
+        """
+        nonlocal sigs_dirty
+        cutoff = (dt.datetime.fromisoformat(now_iso)
+                  - dt.timedelta(seconds=180)).isoformat(timespec="seconds")
+        for rec in sigs_book.values():
+            if rec.get("present", True) and (rec.get("last_seen") or "") < cutoff:
+                rec["present"] = False
+                rec["gone_at"] = now_iso
+                sigs_dirty = True
+                log(f"   sig {rec['id']}: gone - last seen "
+                    f"{(rec.get('last_seen') or '')[11:]}")
+
     def record_sigs(st, frame, box, s):
         """Fold the probe scanner's rows into the signature file.
 
@@ -4863,19 +4914,29 @@ def cmd_watch(args):
         the question is which of these were already scanned, and EVE does not
         remember either.
         """
-        nonlocal sigs_dirty
+        nonlocal sigs_dirty, sigs_saved
+        seen_any = False
         for y, f in field_samples(frame, box, s["ocr_scale"], st["columns"]).items():
             if y < 0:
                 continue
             sid = repair_sig_id(f.get("id"), sigs_book)
             if not sid:
                 continue                # not a signature row, or unreadable
+            seen_any = True
             kind, site, _ = classify_sig(f.get("name"), f.get("group"))
             if note_sig(sigs_book, sid, kind, site, TAG):
                 sigs_dirty = True
                 log(f"   sig {sid}: "
                     + (f"{kind}{' - ' + site if site else ''}" if kind or site
                        else "seen, not yet scanned"))
+        if seen_any:
+            retire_sigs(dt.datetime.now().isoformat(timespec="seconds"))
+            # A plain sighting changes nothing but last_seen, so without this
+            # the file was rewritten only when a type or name changed - which
+            # left every timestamp on disk minutes out of date and made "gone"
+            # impossible to judge.
+            if time.time() - sigs_saved > 60:
+                sigs_dirty = True
 
     def record_pilots(st, frame, box, s):
         """Fold every visible overview row into the pilot book.
@@ -5433,7 +5494,7 @@ def cmd_watch(args):
 
             if sigs_dirty:
                 save_sigs(sigs_book)
-                sigs_dirty = False
+                sigs_dirty, sigs_saved = False, time.time()
 
             if book_dirty and time.time() - book_saved > 20:
                 # Someone editing the file while a watcher runs would otherwise
