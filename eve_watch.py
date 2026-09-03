@@ -904,7 +904,29 @@ def looks_like_pilot(name, ship):
     low = name.casefold()
     if any(low.startswith(w) for w in MENU_WORDS):
         return False
+    # No EVE first name is one or two characters. Now that a truncated fragment
+    # no longer folds into a longer name, "a junk" would otherwise become a
+    # pilot of its own instead of merely being ignored.
+    if len(low.split()[0]) < 3:
+        return False
     return not is_environment(name, ship)
+
+
+def _word_alike(x, y):
+    """One word of a name against the same word read differently."""
+    if x == y:
+        return True
+    short, long_ = sorted((x, y), key=len)
+    if (len(short) >= 4 and short in long_
+            and len(short) / len(long_) >= 0.6):
+        return True                     # "edro" inside "redron"
+    # A word cut short: "he" for "hega". OCR loses trailing glyphs, so a prefix
+    # is real damage - and it is what separates that from "a" against "rasta",
+    # which is not a prefix and was bridging three different pilots.
+    if (len(short) >= 2 and long_.startswith(short)
+            and len(long_) - len(short) <= 3):
+        return True
+    return difflib.SequenceMatcher(None, x, y).ratio() >= 0.8
 
 
 def same_pilot(a, b):
@@ -921,7 +943,20 @@ def same_pilot(a, b):
     "Neki Raz" scores 0.88 - so it is paired with a shared opening. Damage to
     the front is what containment is for; this rule is for damage after it.
     """
-    if len(a) >= 4 and a in b or len(b) >= 4 and b in a:
+    # Word by word when the word counts agree. Whole-string containment was
+    # the bug that put three pilots in one row: "a junk" is a substring of
+    # "rasta junk", "ultra junk" AND "nega junk", so one truncated pass bridged
+    # all three. Corresponding words have to match, which "a" against "rasta"
+    # does not.
+    aw, bw = a.split(), b.split()
+    if aw and len(aw) == len(bw):
+        return all(_word_alike(x, y) for x, y in zip(aw, bw))
+
+    # Different word counts mean OCR joined or split a word. Containment still
+    # applies, but only if the shorter is most of the longer - losing a glyph
+    # or two, not half a name.
+    short, long_ = sorted((a, b), key=len)
+    if len(short) >= 4 and short in long_ and len(short) / len(long_) >= 0.66:
         return True
     lead = 0
     for x, y in zip(a, b):
