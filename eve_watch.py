@@ -5031,7 +5031,15 @@ def cmd_watch(args):
             slots.append(cell["top"] - box["top"] + cell["height"] / 2)
 
         for y, f in best.items():
-            if not any(abs(y - c) <= max(3, st["pitch"] / 4) for c in slots):
+            # A third of a pitch, not a quarter. The pitch is measured from
+            # however many rows a list happened to hold when it was calibrated,
+            # so it can be a pixel or two out - and the error compounds down
+            # the list until real rows sit between slots and are discarded as
+            # menu text. A quarter of a pitch lost them from about the fourth
+            # row, which is why a quiet grid looked fine and a busy one dropped
+            # pilots. Still well under half a pitch, so nothing off the grid
+            # gets in.
+            if not any(abs(y - c) <= max(4, st["pitch"] / 3) for c in slots):
                 continue
             # Only the text fields. field_samples also returns the per-crop
             # vote tallies under "_votes", and joining those in crashed every
