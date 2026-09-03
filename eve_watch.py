@@ -1038,7 +1038,10 @@ def clean_ticker(text):
 MENU_WORDS = ("show info", "look at", "track", "approach", "orbit",
               "keep at range", "align to", "warp to", "dock", "jump through",
               "add to watch", "remove ", "bookmark", "pilot ", "corporation ",
-              "alliance ", "set destination", "lock target", "open cargo")
+              "alliance ", "set destination", "lock target", "open cargo",
+              # not menu items but the same kind of thing: text EVE draws in
+              # an empty list, which lands in a row slot like anything else
+              "nothing found", "no results", "no scan", "scan results")
 
 # Character names are letters, digits, spaces, hyphens and apostrophes. Nothing
 # else. A parenthesis or a stray glyph means it is not a name.
@@ -1053,7 +1056,8 @@ NAME_OK = re.compile(r"^[0-9A-Za-z' -]+$")
 # the moment one did.
 SCENERY = ("wormhole", "asteroid", "beacon", "moon", "planet", "star",
            "stargate", "station", "customs", "gate", "cloud", "container",
-           "probe", "drone", "wreck", "cargo")
+           "probe", "drone", "wreck", "cargo", "celestial", "acceleration",
+           "command centre", "command center", "structure", "citadel")
 
 
 def is_environment(name, ship):
@@ -1089,6 +1093,18 @@ def is_environment(name, ship):
     if any(looks_like(w, term, 0.85)
            for w in a.split() + b.split() for term in ("probe", "drone")):
         return True
+    # Scenery often names itself in the TYPE column and carries an ordinary
+    # name: a stargate called "IG-ZAM", a beacon called "Desolate Aster". The
+    # vocabulary could not be applied to the type loosely - the hull "Astero"
+    # resembles "asteroid" at 0.857 - but at 0.90 it is safe, so check the
+    # type's first word there.
+    # A plain ratio, NOT looks_like: that treats any prefix as a match, so
+    # "asteroid".startswith("astero") made the hull Astero scenery whatever
+    # bar was set. On the ratio, Astero scores 0.857 against asteroid and is
+    # safe, while "stargate" and "celestial" match themselves outright.
+    if tail and any(difflib.SequenceMatcher(None, tail, term).ratio() >= 0.90
+                    for term in SCENERY):
+        return True
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.7
 
 
@@ -1097,7 +1113,10 @@ def looks_like_pilot(name, ship):
         return False                    # no ship, nothing worth recording
     if not NAME_OK.match(name):
         return False
-    low = name.casefold()
+    # Matched against name AND type joined. The columns split a phrase, so
+    # "Show Info" arrived as a name of "Show" with a type of "Info" and
+    # neither half started with anything in the list.
+    low = f"{name} {ship}".casefold().strip()
     if any(low.startswith(w) for w in MENU_WORDS):
         return False
     # No EVE first name is one or two characters. Now that a truncated fragment
