@@ -1475,16 +1475,20 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
                 # If the id is still on screen the row never left: re-bind it
                 # to where it now is and carry on.
                 want = st["rows"][k]["uid"]
-                for se, ex, cell in occupied:
+                # Only cells nothing has claimed yet. And claiming one means
+                # taking it OUT of `fresh`: leaving it there re-bound the row
+                # and then confirmed the same cell as an arrival, so one row
+                # was announced again and again.
+                for entry in list(fresh):
+                    se, ex, cell = entry
                     if id_fn(cell) != want:
                         continue
+                    fresh.remove(entry)
                     st["rows"][k]["bitmap"] = ex
                     st["rows"][k]["misses"] = 0
                     st["rows"][k]["text"] = label_fn(cell) or st["rows"][k]["text"]
                     used.add(k)
                     break
-                else:
-                    st["rows"][k]["misses"] = need      # fall through below
                 if st["rows"][k]["misses"] == 0:
                     continue
 
@@ -1499,8 +1503,9 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
                     # the fact.
                     best = max((find_best(se, gone["bitmap"])
                                 for se, _ex, _c in occupied), default=0.0)
-                    st["why"] = (f"best {best:.4f} vs bar {nmin} across "
-                                 f"{len(occupied)} rows on screen")
+                    st.setdefault("why", []).append(
+                        f"best {best:.4f} vs bar {nmin} across "
+                        f"{len(occupied)} rows on screen")
                     departed.append(text)
 
     arrived, still = [], []
@@ -5176,8 +5181,9 @@ def cmd_watch(args):
                             if arrived or departed or now - st.get("sigs_at", 0) >= 20:
                                 st["sigs_at"] = now
                                 record_sigs(st, frame, box, s)
-                        for gone in departed:
-                            why = st.pop("why", "")
+                        reasons = st.pop("why", [])
+                        for i, gone in enumerate(departed):
+                            why = reasons[i] if i < len(reasons) else ""
                             log(f"   {name}: left - {gone}"
                                 + (f"   [{why}]" if why else ""))
                             record_event(started, name, "depart", gone,
