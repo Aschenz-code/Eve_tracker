@@ -4482,7 +4482,11 @@ def cmd_watch(args):
         for y, f in best.items():
             if not any(abs(y - c) <= max(3, st["pitch"] / 4) for c in slots):
                 continue
-            whole = " ".join(v for v in f.values() if v)
+            # Only the text fields. field_samples also returns the per-crop
+            # vote tallies under "_votes", and joining those in crashed every
+            # watcher on its first overview pass.
+            whole = " ".join(v for k, v in f.items()
+                             if k != "_votes" and isinstance(v, str) and v)
             if ignored(whole, st["cfg"]) or is_noise_row(whole):
                 continue
             who = clean_field(f.get("name"))
