@@ -2793,7 +2793,12 @@ def cmd_calibrate(args):
                           # bar of 0.95 called those departures. Signature rows
                           # have the id as a second opinion below the bar;
                           # overview rows have none, so they keep more room.
-                          pix_ncc=0.80 if p["spec"]["kind"] == "sigs" else 0.85,
+                          # 0.85 on an overview still called a departure at
+                          # 0.8497 - three ten-thousandths - for a pilot who
+                          # had not moved. Two different overview rows reach
+                          # 0.711 measured across a full list, so 0.80 keeps
+                          # nine hundredths of margin where 0.85 kept none.
+                          pix_ncc=0.80,
                           pix_min_lit=20)
         regions.append(region)
         report.append((p["label"],
