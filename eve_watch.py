@@ -1405,6 +1405,11 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
     # kept announcing itself. Nothing sits beside a row to be confused with, so
     # x can be generous; rows are one pitch apart, so y must not be.
     pad_x = st["pix_pad_x"]
+    # Vertical search was 3px. Measured on both clients, a row scores 1.0000
+    # against itself and at most 0.61 against any other row even with a 10px
+    # window, so there is no risk of matching a neighbour and there is no
+    # reason to be this tight about jitter.
+    pad = max(pad, st.get("pix_pad_y") or 0)
     clip = st["pix_clip"]
 
     # Filter the whole box ONCE, then cut cells out of the filtered image.
@@ -1463,8 +1468,18 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
                 continue
             st["rows"][k]["misses"] += 1
             if st["rows"][k]["misses"] >= need:
-                text = st["rows"].pop(k)["text"]
+                gone = st["rows"].pop(k)
+                text = gone["text"]
                 if reportable(text, settings, st.get("require")):
+                    # How close it came, and to what. A departure that is real
+                    # scores near nothing against every cell on screen; one
+                    # that is a misjudgement scores just under the bar, and
+                    # without this there is no way to tell them apart after
+                    # the fact.
+                    best = max((find_best(se, gone["bitmap"])
+                                for se, _ex, _c in occupied), default=0.0)
+                    st["why"] = (f"best {best:.4f} vs bar {nmin} across "
+                                 f"{len(occupied)} rows on screen")
                     departed.append(text)
 
     arrived, still = [], []
@@ -4552,6 +4567,7 @@ def cmd_watch(args):
               "row_offset": r.get("row_offset", 0),
               "pix_pad": r.get("pix_pad", 3),
               "pix_pad_x": r.get("pix_pad_x", 16),
+              "pix_pad_y": r.get("pix_pad_y", 8),
               "pix_clip": r.get("pix_clip", s["threshold"]),
               "cfg": region_settings(r, s),
               "next_id": 0,
@@ -5131,7 +5147,9 @@ def cmd_watch(args):
                                 st["sigs_at"] = now
                                 record_sigs(st, frame, box, s)
                         for gone in departed:
-                            log(f"   {name}: left - {gone}")
+                            why = st.pop("why", "")
+                            log(f"   {name}: left - {gone}"
+                                + (f"   [{why}]" if why else ""))
                             record_event(started, name, "depart", gone,
                                          obs_dir=obs_dir)
                         if arrived:
