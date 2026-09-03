@@ -112,6 +112,7 @@ DEFAULTS = {
     "sensitivity": 8,        # changed pixels before we care (mode=change)
     "presence_pixels": 20,   # lit pixels above empty before "occupied" (presence)
     "interval": 1.0,         # seconds between samples
+    "client_interval": {},   # per-client override, e.g. {"EVE - Scout": 0.5}
     "stable": 3,             # consecutive samples a new state must persist
     "pad": 300,              # context pixels saved around the region on alert
     "search_radius": 200,    # how far the anchor may drift between frames
@@ -4141,7 +4142,14 @@ def cmd_tune(args):
 def cmd_watch(args):
     cfg = load_config()
     s = cfg["settings"]
-    interval = args.interval or s["interval"]
+    # Per-client, because the cost is per client and so is the need: the one
+    # watching a structure wants to catch a pilot in the seconds before they
+    # can cloak, a scout on a quiet hole does not.
+    want = args.client or ""
+    per = s.get("client_interval") or {}
+    interval = args.interval or next(
+        (v for k, v in per.items() if k and (k == want or k in want)),
+        s["interval"])
     sensitivity = args.sensitivity or s["sensitivity"]
     stable_needed = args.stable or s["stable"]
     thr = s["threshold"]

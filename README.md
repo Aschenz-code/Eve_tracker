@@ -75,6 +75,19 @@ hole, and warping off in the moment between two reads. The second is guarded -
 a ship already opening the range is reported as leaving, not jumping - but the
 first is indistinguishable from the outside.
 
+## Polling faster on one client
+
+`interval` in `config.json` is how often a client is sampled, 1 second by
+default. `client_interval` overrides it per client:
+
+    "client_interval": { "EVE - Your Character": 0.5 }
+
+Worth doing on a client watching a structure, where catching someone in the
+seconds before they can cloak decides whether a dock is attributed to a name.
+Measured on one machine, halving it cost two percentage points of a core -
+the standing cost is the periodic OCR, which is gated by `roster_period` and
+does not follow the poll rate.
+
 ## Docking
 
 If a client watches both an overview and the structure counter, the two are
