@@ -861,6 +861,41 @@ MENU_WORDS = ("show info", "look at", "track", "approach", "orbit",
 NAME_OK = re.compile(r"^[0-9A-Za-z' -]+$")
 
 
+# Things the overview lists that are not people. The first word is enough, and
+# it is matched loosely because OCR damages these as readily as anything else.
+SCENERY = ("wormhole", "asteroid", "beacon", "moon", "planet", "star",
+           "stargate", "station", "customs", "gate", "cloud", "container")
+
+
+def is_environment(name, ship):
+    """Whether a row is scenery rather than a pilot.
+
+    Equality of name and type was the original test - a wormhole shows the same
+    text twice - but OCR breaks it: "Wormhole K162" arrived beside a type read
+    as "Wormhnlp", so the row passed as a pilot and was announced as having
+    taken the hole. Resemblance rather than equality, plus the vocabulary of
+    things that appear on a grid, holds up when a reading is damaged.
+    """
+    a, b = name.casefold(), ship.casefold()
+    if not b:
+        return False
+    if a == b:
+        return True
+    if len(b) >= 4 and b in a or len(a) >= 4 and a in b:
+        return True
+    # The vocabulary applies to the NAME only, and needs the type to agree.
+    # Applied to the type it misfires badly: the hull "Astero" resembles
+    # "asteroid" at 0.857, which would have written off the most-seen pilot in
+    # the book. Requiring the type to echo the name keeps a pilot called
+    # "Star ..." in a Loki out of it too - scenery names its own type.
+    head = (a.split() or [""])[0]
+    tail = (b.split() or [""])[0]
+    if any(looks_like(head, term, 0.72) for term in SCENERY):
+        if difflib.SequenceMatcher(None, head, tail).ratio() >= 0.6:
+            return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.7
+
+
 def looks_like_pilot(name, ship):
     if len(name) < 3 or len(ship) < 3:
         return False                    # no ship, nothing worth recording
@@ -869,7 +904,7 @@ def looks_like_pilot(name, ship):
     low = name.casefold()
     if any(low.startswith(w) for w in MENU_WORDS):
         return False
-    return name.casefold() != ship.casefold()   # wormholes, belts, beacons
+    return not is_environment(name, ship)
 
 
 def same_pilot(a, b):
@@ -3181,21 +3216,10 @@ def cmd_events(args):
                     f"{who.get('last_note','')}").lower()
             if need and need not in blob:
                 continue
-            # A sighting older than a couple of roster passes is not "now".
-            # Nothing writes a departure when a client is closed or crashes, so
-            # freshness has to come from the timestamp rather than a flag.
-            now_txt = ""
-            if who.get("now_ship") and who.get("now_at"):
-                try:
-                    age = (dt.datetime.now()
-                           - dt.datetime.fromisoformat(who["now_at"])).total_seconds()
-                except ValueError:
-                    age = 1e9
-                if age <= 90:
-                    now_txt = who["now_ship"]
-                    if who.get("now_by"):
-                        now_txt += f"  ({who['now_by']})"
-            dirn = now_txt
+            # Held until they dock, not until they leave the overview: a pilot
+            # that warped off is still out there in that hull, which is the
+            # thing worth knowing.
+            dirn = who.get("now_ship") or ""
             dock = who.get("last_note", "")
             ptree.insert("", "end", tags=(("here",) if dirn else ()), values=(
                 who.get("name", ""), dirn, ship_s, corp_s, who.get("seen", 0),
@@ -4168,13 +4192,12 @@ def cmd_watch(args):
         if who is not None:
             who["last_dir"] = direction
             who["last_by"] = TAG
+            # Dropping off the overview means they warped, cloaked or took a
+            # hole - all of which leave them in space, still in that hull. Only
+            # docking puts a ship away, so only a dock clears this.
             flying = who.get("now_ship") or who.get("last_ship") or ""
             if flying:
                 who["last_ship"] = flying
-            if direction == "out":
-                who.pop("now_ship", None)
-                who.pop("now_at", None)
-                who.pop("now_by", None)
             book_dirty = True
 
         # Taking a wormhole looks the same as any other disappearance, except
@@ -4194,8 +4217,7 @@ def cmd_watch(args):
             in_what = f" in {flying}" if flying else ""
             if who is not None:
                 who["jumps"] = who.get("jumps", 0) + 1
-                who["last_note"] = (f"took the hole {dt.datetime.now():%H:%M:%S}"
-                                    f"{in_what}")
+                who["last_note"] = f"took the hole {dt.datetime.now():%H:%M:%S}"
                 book_dirty = True
             log(f"** {name}{in_what} TOOK THE WORMHOLE - vanished "
                 f"{abs(was_at - hole_at)/1000:.1f}km from it, last seen at "
@@ -4213,8 +4235,7 @@ def cmd_watch(args):
             at = f" at {was_at/1000:.0f}km" if was_at is not None else ""
             in_what = f" in {flying}" if flying else ""
             if who is not None:
-                who["last_note"] = (f"left {dt.datetime.now():%H:%M:%S}"
-                                    f"{at}{in_what}")
+                who["last_note"] = f"left {dt.datetime.now():%H:%M:%S}{at}"
                 book_dirty = True
             log(f"   {name} left{at}{why}{in_what}"
                 + (f" (hole is at {hole_at/1000:.0f}km)" if hole_at else ""))
@@ -4259,8 +4280,11 @@ def cmd_watch(args):
             flying = ""
             if who is not None:
                 flying = who.get("now_ship") or who.get("last_ship") or ""
-                who["last_note"] = (f"{verb} {dt.datetime.now():%H:%M:%S}"
-                                    + (f" in {flying}" if flying else ""))
+                who["last_note"] = f"{verb} {dt.datetime.now():%H:%M:%S}"
+                if up:                  # docked: the hull is put away
+                    who.pop("now_ship", None)
+                    who.pop("now_at", None)
+                    who.pop("now_by", None)
                 book_dirty = True
             in_what = f" in {flying}" if flying else ""
             log(f"** {name}{in_what} {verb} (structure count "
