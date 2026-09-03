@@ -145,6 +145,13 @@ unknown. A running watcher picks up new values within seconds.
   disk on purpose: after downtime or a relog the question is which of these you
   had already scanned, and EVE does not remember either.
 
+  It is kept per client, because two clients are often in different systems -
+  a scout takes the next hole while the other sits at home - and one shared
+  list had each of them concluding the other's signatures had all vanished.
+  Signature ids are unique to a system, so a list sharing not one id with what
+  was there is a different system: the old set is retired at once and the new
+  one adopted without alerting, since those are not new spawns.
+
   The probe scanner alerts on a new **id**, never on a row changing. Scanning
   rewrites the Name and Group columns of a row that was already there, which
   looks like an arrival to anything comparing images - so a row that resolves

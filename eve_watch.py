@@ -900,11 +900,24 @@ def repair_sig_id(raw, known=()):
 
 
 def load_sigs():
+    """{client: {id: record}}.
+
+    Scoped per client because two clients are often in different systems - a
+    scout moves to the next hole while the other sits at home - and a single
+    shared list made each one think the other's signatures had all vanished
+    and its own had all just appeared.
+    """
     try:
         with open(SIGFILE, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+            book = json.load(fh)
     except (OSError, json.JSONDecodeError):
         return {}
+    if book and all(isinstance(v, dict) and "id" in v for v in book.values()):
+        flat, book = book, {}           # the older single-list form
+        for rec in flat.values():
+            for who in rec.get("clients") or ["(unknown)"]:
+                book.setdefault(who, {})[rec["id"]] = dict(rec)
+    return book
 
 
 def save_sigs(book):
@@ -3772,7 +3785,14 @@ def cmd_events(args):
         if not force and stamp == sstate["mtime"]:
             return
         sstate["mtime"] = stamp
-        book = load_sigs()
+        # the file is {client: {id: record}}; flatten for display, keeping
+        # which client saw each one, since two clients can be in two systems
+        book = {}
+        for who, mine in load_sigs().items():
+            for sid, rec in mine.items():
+                rec = dict(rec)
+                rec["clients"] = [who]
+                book[f"{who}/{sid}"] = rec
         stree.delete(*stree.get_children())
         # unscanned first, then most recently seen: the list is a to-do list
         rows = sorted(book.values(),
@@ -4885,7 +4905,7 @@ def cmd_watch(args):
             record_event(started, "structure", verb, f"{name}{in_what}",
                          obs_dir=obs_dir)
 
-    def retire_sigs(now_iso):
+    def retire_sigs(mine, now_iso):
         """Mark signatures that have stopped appearing.
 
         Nothing removed them before, so one that despawned, was finished, or
@@ -4899,7 +4919,7 @@ def cmd_watch(args):
         nonlocal sigs_dirty
         cutoff = (dt.datetime.fromisoformat(now_iso)
                   - dt.timedelta(seconds=180)).isoformat(timespec="seconds")
-        for rec in sigs_book.values():
+        for rec in mine.values():
             if rec.get("present", True) and (rec.get("last_seen") or "") < cutoff:
                 rec["present"] = False
                 rec["gone_at"] = now_iso
@@ -4915,22 +4935,43 @@ def cmd_watch(args):
         remember either.
         """
         nonlocal sigs_dirty, sigs_saved
+        mine = sigs_book.setdefault(TAG or "(unknown)", {})
+        # Before recording anything: the loop below marks every id it sees as
+        # present, so asking afterwards whether the new ids overlap the old
+        # ones always says yes and a jump is never noticed.
+        was_here = {k for k, v in mine.items() if v.get("present", True)}
         seen_any = False
+        seen_ids = set()
         for y, f in field_samples(frame, box, s["ocr_scale"], st["columns"]).items():
             if y < 0:
                 continue
-            sid = repair_sig_id(f.get("id"), sigs_book)
+            sid = repair_sig_id(f.get("id"), mine)
             if not sid:
                 continue                # not a signature row, or unreadable
             seen_any = True
+            seen_ids.add(sid)
             kind, site, _ = classify_sig(f.get("name"), f.get("group"))
-            if note_sig(sigs_book, sid, kind, site, TAG):
+            if note_sig(mine, sid, kind, site, TAG):
                 sigs_dirty = True
                 log(f"   sig {sid}: "
                     + (f"{kind}{' - ' + site if site else ''}" if kind or site
                        else "seen, not yet scanned"))
         if seen_any:
-            retire_sigs(dt.datetime.now().isoformat(timespec="seconds"))
+            # Signature ids are unique to a system, so a list that shares NOT
+            # ONE id with what was here is a different system - the scout took
+            # the next hole. Retire the old set at once instead of waiting out
+            # the absence timer, and say so, because these are not new spawns.
+            here = was_here - seen_ids
+            if here and seen_ids and not (seen_ids & was_here):
+                st["jumped"] = True
+                log(f"   {len(here)} signature(s) gone at once and "
+                    f"{len(seen_ids)} new - treating as a different system")
+                for k in here:
+                    mine[k]["present"] = False
+                    mine[k]["gone_at"] = dt.datetime.now().isoformat(
+                        timespec="seconds")
+                sigs_dirty = True
+            retire_sigs(mine, dt.datetime.now().isoformat(timespec="seconds"))
             # A plain sighting changes nothing but last_seen, so without this
             # the file was rewritten only when a type or name changed - which
             # left every timestamp on disk minutes out of date and made "gone"
@@ -5273,13 +5314,18 @@ def cmd_watch(args):
                             # the file has never held. Note the known set BEFORE
                             # recording, or every id looks familiar by the time
                             # the alert is decided.
-                            known_ids = set(sigs_book)
+                            known_ids = set(sigs_book.get(TAG or "(unknown)", {}))
                             if arrived or departed or now - st.get("sigs_at", 0) >= 20:
                                 st["sigs_at"] = now
                                 record_sigs(st, frame, box, s)
+                            if st.pop("jumped", False):
+                                log(f"   {name}: different system - adopting "
+                                    f"its signatures without alerting")
+                                arrived = []
                             keep = []
                             for label in arrived:
-                                sid = repair_sig_id(label, sigs_book)
+                                sid = repair_sig_id(
+                                    label, sigs_book.get(TAG or "(unknown)", {}))
                                 if sid and sid not in known_ids:
                                     keep.append(label)
                                 elif sid:
