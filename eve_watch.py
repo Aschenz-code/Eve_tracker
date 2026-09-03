@@ -69,6 +69,7 @@ CSVFILE = os.path.join(HERE, "events.csv")
 PAUSEFILE = os.path.join(HERE, "PAUSED")   # exists = the running watcher idles
 CLIPFILE  = os.path.join(HERE, "CLIPBOARD_OWNER")  # which watcher reads Ctrl+C
 PILOTS    = os.path.join(HERE, "pilots.json")      # who has been seen, in what
+MARKS     = os.path.join(HERE, "pilot_marks.log")  # corrections from the viewer
 
 
 def pause_path(client=None):
@@ -791,6 +792,43 @@ def split_columns(words, columns, box_left):
     return {k: " ".join(v).strip() for k, v in out.items()}
 
 
+def mark_pilot(key, what):
+    """Record a correction for the watchers to pick up.
+
+    Editing pilots.json from the viewer would not survive: a watcher holds the
+    book in memory and writes it back. So corrections go in their own
+    append-only file with a timestamp, and each watcher applies whatever is
+    newer than the last line it saw. Idempotent, and no watcher has to consume
+    the file for the others to see it.
+    """
+    try:
+        with open(MARKS, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.time():.3f}\t{what}\t{key}\n")
+        return True
+    except OSError:
+        return False
+
+
+def read_marks(since=0.0):
+    """Corrections newer than `since`, as (stamp, what, key)."""
+    out = []
+    try:
+        with open(MARKS, "r", encoding="utf-8") as fh:
+            for line in fh:
+                bits = line.rstrip("\n").split("\t")
+                if len(bits) != 3:
+                    continue
+                try:
+                    at = float(bits[0])
+                except ValueError:
+                    continue
+                if at > since:
+                    out.append((at, bits[1], bits[2]))
+    except OSError:
+        pass
+    return out
+
+
 def load_pilots():
     try:
         with open(PILOTS, "r", encoding="utf-8") as fh:
@@ -996,6 +1034,31 @@ def resolve_key(book, name, extra=()):
     return key
 
 
+def ship_alike(a, b):
+    """Whether two readings are the same hull.
+
+    Plain similarity is unsafe here and was rejected once already: "Naglfar"
+    against "Na Ifar" scores 0.714, and so do Punisher and Purifier, which are
+    different hulls. What separates them is that OCR SPLITS a word - it does
+    not turn one hull's name into another's. So the test is whether joining the
+    gaps out of the readings makes them agree, which only applies when the
+    readings disagree about how many words there are.
+    """
+    a, b = a.casefold(), b.casefold()
+    if a == b:
+        return True
+    if (" " in a) == (" " in b):
+        return False                    # both whole, or both split the same way
+    ja, jb = a.replace(" ", ""), b.replace(" ", "")
+    # 0.75, because "naifar" against "naglfar" is 0.769 - OCR lost a glyph as
+    # well as inserting the gap. Only readings that DISAGREE about word count
+    # reach this line, so the pairs a loose bar would endanger - two whole
+    # single-word hulls like Punisher and Purifier - never get here. Real
+    # multi-word hulls are far below it: "Vexor Navy Issue" against "Vexor"
+    # scores 0.53.
+    return difflib.SequenceMatcher(None, ja, jb).ratio() >= 0.75
+
+
 def name_score(text):
     """Rank two spellings of one name. Lower is better.
 
@@ -1066,6 +1129,17 @@ def note_pilot(book, name, ship, corp, client, when=None, visit=True):
                          ("corps", clean_ticker(corp))):
         if not value:
             continue
+        if field == "ships" and value not in who[field]:
+            # Fold a split reading into the whole one. Fewest gaps wins: OCR
+            # breaks a word apart, it does not join two.
+            for held in list(who[field]):
+                if ship_alike(value, held):
+                    keep = min((value, held), key=lambda t: (t.count(" "), -len(t)))
+                    other = held if keep == value else value
+                    if keep != held:
+                        who[field][keep] = who[field].pop(held)
+                    value = keep
+                    break
         slot = who[field].setdefault(value, {"first": when, "count": 0})
         if slot["count"] == 0:
             fresh = True
@@ -1125,9 +1199,17 @@ def field_samples(frame, box, scale, columns, pads=(0, 4, 12)):
                 value = clean_field(value)
                 if not value:
                     continue
-                have = out[slot].get(key, "")
-                if (len(value), -value.count(" ")) > (len(have), -have.count(" ")):
-                    out[slot][key] = value
+                tally = out[slot].setdefault("_votes", {}).setdefault(key, {})
+                tally[value] = tally.get(value, 0) + 1
+
+    # Pick per field once every crop has voted. Majority first, then the
+    # cleanest reading, then the longest. Longest alone was wrong: a row read
+    # "J144944 - Rooftop" by two crops and "J 14 4 9 - Rooftop" by one, and
+    # length handed it to the single damaged vote.
+    for slot, fields in out.items():
+        for key, tally in (fields.get("_votes") or {}).items():
+            fields[key] = max(tally, key=lambda v: (tally[v],) + tuple(
+                -x for x in name_score(v)))
     return out
 
 
@@ -3194,6 +3276,27 @@ def cmd_events(args):
     pent.pack(side="left", padx=(4, 0))
     tk.Button(ptop, text="Refresh", width=10,
               command=lambda: both(force=True)).pack(side="left", padx=(16, 0))
+    def mark_selected(what):
+        """Correct the selected pilot. The watchers pick it up within seconds."""
+        rows = ptree.selection()
+        if not rows:
+            pcount.configure(text="select a pilot first", fg="#b00")
+            return
+        done = []
+        for iid in rows:
+            name = ptree.item(iid, "values")[0]
+            if name and mark_pilot(pilot_key(name), what):
+                done.append(name)
+        pcount.configure(
+            text=f"{what}: {', '.join(done)} - applying...", fg="#060")
+        root.after(3000, lambda: pilots_refresh(force=True))
+
+    tk.Button(ptop, text="Mark docked", width=13,
+              command=lambda: mark_selected("docked")).pack(side="left",
+                                                            padx=(16, 0))
+    tk.Button(ptop, text="Forget", width=9,
+              command=lambda: mark_selected("forget")).pack(side="left",
+                                                            padx=(4, 0))
     pcount = tk.Label(ptop, text="", font=("Segoe UI", 9), fg="#666")
     pcount.pack(side="left", padx=(12, 0))
 
@@ -4207,6 +4310,13 @@ def cmd_watch(args):
             raise_alarm(phrase or st["say"], f"{name}: {detail}\n\n{shot}", args)
 
     book, book_dirty, book_saved = load_pilots(), False, time.time()
+    # Anything newer than the book's last save has not been folded in yet -
+    # including a mark written while the watchers were down, which starting
+    # from the newest line in the file would have discarded for good.
+    try:
+        marks_at = os.path.getmtime(PILOTS)
+    except OSError:
+        marks_at = 0.0
     # Overview comings and goings, and structure counts that have not been
     # explained yet. The counter can fire up to five seconds EITHER side of the
     # overview event - measured across 16 changes, all within 5s - so both
@@ -4379,12 +4489,19 @@ def cmd_watch(args):
             st["seen_names"].add(key)
             here.add(key)
 
-            # What gets WRITTEN still has to repeat. The same pixels read as
-            # "Porpoise", "Po Oise" and "os ect" depending on nothing the tool
-            # controls, so a hull must be seen twice before it is recorded.
+            # What gets WRITTEN still has to be corroborated, because the same
+            # pixels read as "Porpoise", "Po Oise" and "os ect" depending on
+            # nothing the tool controls. Two of the three crops agreeing inside
+            # ONE pass is the better evidence, and unlike a count of passes it
+            # survives a restart - which is what kept a pilot read correctly
+            # twice out of the book, because the watcher was restarted between
+            # the two sightings and the tally started again.
+            votes = f.get("_votes") or {}
+            agreed = (votes.get("name", {}).get(who, 0) >= 2
+                      and votes.get("type", {}).get(ship, 0) >= 2)
             token = (key, ship)
             st["pilot_reads"][token] = st["pilot_reads"].get(token, 0) + 1
-            if st["pilot_reads"][token] < 2:
+            if not agreed and st["pilot_reads"][token] < 2:
                 continue
             far = parse_distance(f.get("distance"))
             if far is not None:
@@ -4812,6 +4929,24 @@ def cmd_watch(args):
                 b = state[regions[0]["name"]]["tr"].locate(frame) or regions[0]["target"]
                 to_image(context_crop(frame, b, s["pad"])).save(
                     os.path.join(rec, dt.datetime.now().strftime("%Y%m%d_%H%M%S") + ".png"))
+
+            fresh_marks = read_marks(marks_at)
+            if fresh_marks:
+                for at, what, key in fresh_marks:
+                    marks_at = max(marks_at, at)
+                    who = book.get(resolve_key(book, key))
+                    if who is None:
+                        continue
+                    if what == "docked":
+                        for f in ("now_ship", "now_at", "now_by"):
+                            who.pop(f, None)
+                        who["last_note"] = (f"docked "
+                                            f"{dt.datetime.now():%H:%M:%S}"
+                                            f" (marked by hand)")
+                    elif what == "forget":
+                        book.pop(resolve_key(book, key), None)
+                    log(f"   pilot mark applied: {what} {key!r}")
+                    book_dirty = True
 
             if book_dirty and time.time() - book_saved > 20:
                 # Someone editing the file while a watcher runs would otherwise

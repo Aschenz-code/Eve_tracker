@@ -32,3 +32,4 @@ CLIPBOARD_OWNER
 PAUSED.*
 pilots.json
 pilots.json.tmp
+pilot_marks.log
