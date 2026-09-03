@@ -145,6 +145,11 @@ unknown. A running watcher picks up new values within seconds.
   disk on purpose: after downtime or a relog the question is which of these you
   had already scanned, and EVE does not remember either.
 
+  The probe scanner alerts on a new **id**, never on a row changing. Scanning
+  rewrites the Name and Group columns of a row that was already there, which
+  looks like an arrival to anything comparing images - so a row that resolves
+  is recorded silently and only an id the file has never held is announced.
+
   Scanned is not a flag the game shows - it is the absence of one. An unresolved
   signature has an empty Group column and a Name of "Cosmic Signature"; once
   probed the Group names the type, and at full strength the Name becomes the

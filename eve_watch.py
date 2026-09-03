@@ -2195,7 +2195,11 @@ PANELS = [
     {"kind": "overview", "title": ["overview"], "mode": "roster",
      "headers": ["distance", "name", "type", "corporation", "alliance", "velocity"],
      "id_upto": "corporation", "id_from": "name",
-     "say": "new contact in {label}", "ignore": ["Sun", "Fortizar"]},
+     # A wormhole entering the overview is almost always you warping to it,
+     # not a hole opening. A hole that actually opens shows up as a new
+     # signature id, which is announced there and is the reliable signal.
+     "say": "new contact in {label}",
+     "ignore": ["Sun", "Fortizar", "Wormhole", "Scanner Probe"]},
     {"kind": "sigs", "title": ["probe", "scanner"], "mode": "roster",
      "headers": ["distance", "id", "name", "group", "signal"],
      "id_upto": "name", "id_from": "id", "id_column": "id",
@@ -5182,13 +5186,29 @@ def cmd_watch(args):
                                 st["pilots_at"] = now
                                 record_pilots(st, frame, box, s)
                         elif st["columns"] and name.startswith("sigs"):
-                            # Same gate as the pilots: read when the list moved,
-                            # and otherwise now and then, because a signature
-                            # resolving changes the Group column without adding
-                            # or removing a row.
+                            # A signature is its id, not its pixels. Scanning
+                            # rewrites the Name and Group columns of a row that
+                            # was already there, which looks like an arrival to
+                            # anything comparing images - so announce only ids
+                            # the file has never held. Note the known set BEFORE
+                            # recording, or every id looks familiar by the time
+                            # the alert is decided.
+                            known_ids = set(sigs_book)
                             if arrived or departed or now - st.get("sigs_at", 0) >= 20:
                                 st["sigs_at"] = now
                                 record_sigs(st, frame, box, s)
+                            keep = []
+                            for label in arrived:
+                                sid = repair_sig_id(label, sigs_book)
+                                if sid and sid not in known_ids:
+                                    keep.append(label)
+                                elif sid:
+                                    log(f"   {name}: {sid} changed, not new "
+                                        f"- no alert")
+                                else:
+                                    log(f"   {name}: unreadable row changed "
+                                        f"- no alert")
+                            arrived = keep
                         reasons = st.pop("why", [])
                         for i, gone in enumerate(departed):
                             why = reasons[i] if i < len(reasons) else ""
