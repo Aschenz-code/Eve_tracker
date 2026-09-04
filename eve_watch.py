@@ -920,7 +920,19 @@ def load_sigs():
     return book
 
 
-def save_sigs(book):
+def save_sigs(book, only=None):
+    """Write, leaving other clients' sections as they are on disk.
+
+    Scoping the store per client fixed the logic but not the file: both
+    watchers hold the whole thing in memory and wrote it whole, so each
+    clobbered the other's section. One client's list sat frozen an hour in the
+    past - still listing a wormhole it had already reported rolled - while the
+    other stayed current, and the viewer showed whichever had written last.
+    """
+    if only:
+        disk = load_sigs()
+        disk[only] = book.get(only, {})
+        book = disk
     tmp = SIGFILE + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -5632,7 +5644,7 @@ def cmd_watch(args):
                     book_dirty = True
 
             if sigs_dirty:
-                save_sigs(sigs_book)
+                save_sigs(sigs_book, only=TAG or "(unknown)")
                 sigs_dirty, sigs_saved = False, time.time()
 
             if book_dirty and time.time() - book_saved > 20:

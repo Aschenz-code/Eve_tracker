@@ -152,6 +152,11 @@ unknown. A running watcher picks up new values within seconds.
   was there is a different system: the old set is retired at once and the new
   one adopted without alerting, since those are not new spawns.
 
+  Refreshed whenever the scanner's list changes, and otherwise every 20
+  seconds - copying to the clipboard is not required. A paste only adds what
+  OCR cannot read reliably: the exact id, type and site name. A signature that
+  stops appearing for three minutes is marked gone.
+
   The probe scanner alerts on a new **id**, never on a row changing. Scanning
   rewrites the Name and Group columns of a row that was already there, which
   looks like an arrival to anything comparing images - so a row that resolves
