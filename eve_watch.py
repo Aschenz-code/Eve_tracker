@@ -54,6 +54,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 import cv2
 import numpy as np
@@ -1287,6 +1288,19 @@ def ship_alike(a, b):
     return difflib.SequenceMatcher(None, ja, jb).ratio() >= 0.75
 
 
+def backing_votes(tally, winner, alike):
+    """How many crops read something that IS the winner, dropped glyphs and all.
+
+    A crop that read "S asher" corroborates "Slasher": OCR drops glyphs, it
+    does not invent them. Counting only byte-identical readings made a merged
+    winner look unsupported by the very crops it was merged from.
+    """
+    if not winner:
+        return 0
+    return sum(n for value, n in tally.items()
+               if value == winner or alike(value, winner))
+
+
 def name_score(text):
     """Rank two spellings of one name. Lower is better.
 
@@ -2125,6 +2139,7 @@ def post_webhook(url, text):
 _alerts = queue.Queue()
 _alert_worker = None
 ALERT_HOLD = 0.8            # seconds spent gathering before anything is said
+PILOT_RUSH = 4              # quick column re-reads allowed after an arrival
 
 
 def speech_gate(seconds=8.0):
@@ -5094,6 +5109,10 @@ def cmd_watch(args):
         nonlocal book_dirty
         best = field_samples(frame, box, s["ocr_scale"], st["columns"])
         here = set()
+        # Did any row that looks like a pilot fail to corroborate itself? If
+        # so the caller must come straight back rather than wait out the slow
+        # refresh, or a short visit is never recorded at all.
+        unsure = False
         # What each row was read as flying THIS pass. The arrival alert
         # cannot go to the record for it: a first-ever pilot has no record
         # yet at the point the hull is wanted.
@@ -5181,12 +5200,24 @@ def cmd_watch(args):
                 entry["now_at"] = dt.datetime.now().isoformat(timespec="seconds")
                 book_dirty = True
 
+            # Corroboration has to be judged the way the winner was
+            # CHOSEN. rank() deliberately prefers letters over majority,
+            # because OCR drops glyphs and does not invent them - so "Slasher"
+            # beats "S asher" at one vote against two. This then demanded a
+            # majority for the very value rank had picked against the
+            # majority, so the readings rank exists to rescue could never
+            # corroborate: a Slasher was read perfectly, name and hull, and
+            # discarded. Count a reading that is the winner with glyphs lost
+            # as backing it, because that is what it is.
             votes = f.get("_votes") or {}
-            agreed = (votes.get("name", {}).get(who, 0) >= 2
-                      and votes.get("type", {}).get(ship, 0) >= 2)
+            agreed = (backing_votes(votes.get("name", {}), who,
+                                    same_pilot) >= 2
+                      and backing_votes(votes.get("type", {}), ship,
+                                        ship_alike) >= 2)
             token = (key, ship)
             st["pilot_reads"][token] = st["pilot_reads"].get(token, 0) + 1
             if not agreed and st["pilot_reads"][token] < 2:
+                unsure = True
                 continue
             # A visit, not a poll: the roster is re-read every few seconds, so
             # counting every pass measured how long the client was open rather
@@ -5199,6 +5230,7 @@ def cmd_watch(args):
             # forced a write.
             book_dirty = True
 
+        st["pilots_unsure"] = unsure
         st["arrived_names"] = []
         for key in here - st["pilots_seen"]:
             # A pilot seen for the first time had no record when the hull was
@@ -5438,7 +5470,23 @@ def cmd_watch(args):
                         # to keep "in space now" fresh. Must come AFTER the
                         # reconcile, which is what says whether it moved.
                         if st["columns"] and name.startswith("overview"):
-                            if arrived or departed or now - st.get("pilots_at", 0) >= 25:
+                            # A pilot present for less than the slow refresh
+                            # got exactly ONE column read, and a single read
+                            # that does not corroborate itself is discarded -
+                            # so a ship that came and went inside half a
+                            # minute was announced and then never recorded.
+                            # An arrival buys a few quick re-reads, spent only
+                            # while something is still unconfirmed: a name that
+                            # never reads cleanly would otherwise re-read on
+                            # every pass for as long as it sat there.
+                            if arrived:
+                                st["pilots_owed"] = PILOT_RUSH
+                            hurry = (st.get("pilots_owed", 0) > 0
+                                     and st.get("pilots_unsure"))
+                            if (arrived or departed or hurry
+                                    or now - st.get("pilots_at", 0) >= 25):
+                                if hurry and not (arrived or departed):
+                                    st["pilots_owed"] -= 1
                                 st["pilots_at"] = now
                                 record_pilots(st, frame, box, s)
                         elif st["columns"] and name.startswith("sigs"):
@@ -5723,6 +5771,18 @@ def cmd_watch(args):
     except KeyboardInterrupt:
         log("stopped by user.")
         record_event(started, "-", "stop", obs_dir=obs_dir)
+    except Exception:
+        # pythonw has no console, so an unhandled exception went to a stderr
+        # that goes nowhere: the watcher died with exit code 1 and nothing
+        # anywhere said why. Two crashes went undiagnosed exactly that way,
+        # and the supervisor restarted into the same unknown fault.
+        trace = traceback.format_exc()
+        nl = chr(10)
+        log("!! CRASHED" + nl + "   "
+            + trace.rstrip().replace(nl, nl + "   "))
+        record_event(started, "-", "crash", trace.strip().splitlines()[-1],
+                     obs_dir=obs_dir)
+        raise
     finally:
         cap.stop()
 
