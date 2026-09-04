@@ -1054,6 +1054,18 @@ NAME_OK = re.compile(r"^[0-9A-Za-z' -]+$")
 # leaving that to a per-region ignore list was not enough: a recalibration
 # rewrites those lists, and a scanner probe walked back into the pilot book
 # the moment one did.
+# Fragments of the NPC station and structure type names. The type column
+# truncates, so "Caldari Administration Station" arrives as "ri Adminis" and
+# "Stargate (Caldari)" as "ate (Calda" - the words a vocabulary matches on are
+# exactly the ones cut off. These are matched as substrings for that reason,
+# and chosen not to appear in any hull name: "navy" and "command" are out
+# because Apocalypse Navy Issue and command ships exist.
+STATIONISH = ("adminis", "tribunal", "bureau", "logistic", "academy",
+              "assembly", "chemical", "warehouse", "testing", "manufact",
+              "depository", "archives", "laboratory", "outpost", "treasury",
+              "directive", "prison", "school", "foundry", "reprocess",
+              "stargate", "starbase", "shipyard")
+
 ROMAN = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
          "xi", "xii", "xiii", "xiv", "xv", "xvi", "xvii", "xviii", "xix", "xx"}
 
@@ -1124,6 +1136,13 @@ def is_environment(name, ship):
     # and 1 stand in for I, so "Ill" has to count.
     last = (a.split() or [""])[-1]
     if len(a.split()) > 1 and last.replace("l", "i").replace("1", "i") in ROMAN:
+        return True
+    # No hull name contains a bracket. Stations, stargates and suns all do -
+    # "Stargate (Caldari)", "Sun A0 (Blue Small)" - and they keep it even when
+    # the column cuts the name down to "ate (Calda".
+    if "(" in b or ")" in b:
+        return True
+    if any(term in b for term in STATIONISH):
         return True
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.7
 
