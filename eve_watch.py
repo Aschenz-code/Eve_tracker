@@ -2184,6 +2184,13 @@ def _say_batch(batch):
         phrase = f"{tag}{len(items)} changes. " + "; ".join(parts)
 
     title = f"EVE watch - {TAG}" if TAG else "EVE watch"
+    # An alert that did not reach you is otherwise undiagnosable: the log
+    # recorded the sighting and nothing at all about whether anything was
+    # said, so "I saw them and got no notification" could not be answered.
+    ways = ",".join(w for w, on in (("beep", getattr(opts, "beeps", True)),
+                                    ("voice", opts.voice),
+                                    ("popup", opts.popup)) if on) or "silent"
+    log(f"   announcing [{ways}]: {phrase}")
     if opts.popup:
         body = ("\n\n").join(b for _r, b, _o, _a in batch)
         if TAG:
@@ -5087,6 +5094,10 @@ def cmd_watch(args):
         nonlocal book_dirty
         best = field_samples(frame, box, s["ocr_scale"], st["columns"])
         here = set()
+        # What each row was read as flying THIS pass. The arrival alert
+        # cannot go to the record for it: a first-ever pilot has no record
+        # yet at the point the hull is wanted.
+        seen_hull = {}
 
         # Only text sitting in an occupied row slot counts. Reading every line
         # in the box instead put a right-click menu into the book as eight
@@ -5160,6 +5171,8 @@ def cmd_watch(args):
                 seen_at = st["last_dist"].setdefault(key, [])
                 seen_at.append(far)
                 del seen_at[:-3]        # only the last few matter
+            if ship:
+                seen_hull[key] = ship
             entry = book.get(key)
             if entry is not None and ship:
                 touched.add(key)
@@ -5185,14 +5198,19 @@ def cmd_watch(args):
             # NEW, which left last_seen sitting unsaved until something else
             # forced a write.
             book_dirty = True
-            # What they are in NOW, as opposed to the tally of everything they
+
         st["arrived_names"] = []
         for key in here - st["pilots_seen"]:
+            # A pilot seen for the first time had no record when the hull was
+            # read, so this contributed NOTHING and the alert fell back to the
+            # raw single-pass label - which is how an Astero was announced as a
+            # bare name. Worse, one new pilot among several made the alert list
+            # only the ones already known. Take the hull from this pass, and
+            # name them even if the record is not written yet.
             entry = book.get(key)
-            if entry:
-                hull = entry.get("now_ship") or ""
-                st["arrived_names"].append(
-                    f"{entry['name']} {hull}".strip())
+            hull = seen_hull.get(key) or (entry or {}).get("now_ship") or ""
+            shown = (entry or {}).get("name") or key
+            st["arrived_names"].append(f"{shown} {hull}".strip())
             note_move(key, "in")
         for key in st["pilots_seen"] - here:
             note_move(key, "out", track=st["last_dist"].get(key),
