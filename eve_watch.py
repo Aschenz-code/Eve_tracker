@@ -878,7 +878,7 @@ def repair_sig_id(raw, known=()):
 
     Two steps. Fix characters that sit on the wrong side of the dash - "PTG-6O4"
     is a zero, not a letter O. Then, for a reading cut short, adopt a stored id
-    it uniquely prefixes: "EMT-6" can only be "EMT-600" if that is the only
+    it uniquely prefixes: "ABC-6" can only be "ABC-600" if that is the only
     match, and ids are unique enough that a five-character prefix decides it.
     """
     t = normalise_glyphs(clean_field(raw) or "").upper().replace(" ", "")
@@ -1007,7 +1007,7 @@ _EDGE  = re.compile(r"^[^0-9A-Za-z]+|[^0-9A-Za-z')]+$")
 def clean_field(text):
     """Strip the punctuation OCR hangs on a column edge.
 
-    The same sighting produced "OwlShadow", "OwlShadow_" and "OwlShadow-" on
+    The same sighting produced "Nightfall", "Nightfall_" and "Nightfall-" on
     three consecutive passes, and each became its own pilot. EVE character
     names cannot end in an underscore and ship types are letters and spaces,
     so trailing marks are artifacts every time.
@@ -1016,12 +1016,12 @@ def clean_field(text):
 
 
 def clean_ticker(text):
-    """A corp ticker, or nothing. Tickers are bracketed; "(AXAPII" is a misread."""
+    """A corp ticker, or nothing. Tickers are bracketed; "(TICKI" is a misread."""
     # Match BEFORE cleaning the edges: cleaning strips the very brackets that
     # tell a real ticker from a misread of one. A bracket must be present on at
     # least one side - that is what marks this as the corp column and not a
     # word that drifted in - but the closing one is often read as a letter
-    # ("(AXAPII" for "[AXAPI]"), so repair that rather than discard the corp.
+    # ("(TICKI" for "[TICK]"), so repair that rather than discard the corp.
     raw = " ".join((text or "").split())
     if not raw:
         return ""
@@ -1185,7 +1185,7 @@ def _word_alike(x, y):
     short, long_ = sorted((x, y), key=len)
     if (len(short) >= 4 and short in long_
             and len(short) / len(long_) >= 0.6):
-        return True                     # "edro" inside "redron"
+        return True                     # "avel" inside "Ravelin"
     # A word cut short: "he" for "hega". OCR loses trailing glyphs, so a prefix
     # is real damage - and it is what separates that from "a" against "rasta",
     # which is not a prefix and was bridging three different pilots.
@@ -1199,13 +1199,13 @@ def same_pilot(a, b):
     """Whether two OCR spellings are the same name.
 
     Two failure modes, two rules. OCR drops glyphs off the ENDS, so a bad
-    reading is often a piece of the good one - "edro" inside "redron" - which
+    reading is often a piece of the good one - "avel" inside "Ravelin" - which
     containment catches. It also mangles the MIDDLE of a long name:
-    "Iranama Hega Zirud" came back as "Iranama He Tirud" and "Iranama He a Z",
+    "Ondari Vela Tarin" came back as "Ondari Ve Tarin" and "Ondari Ve a T",
     three separate pilots in the book. Those score 0.73-0.88, while every pair
     of genuinely different names recorded scored at most 0.40.
 
-    A similarity bar alone would still be unsafe - "Meki Raz" against a real
+    A similarity bar alone would still be unsafe - "Sorel Kade" against a real
     "Neki Raz" scores 0.88 - so it is paired with a shared opening. Damage to
     the front is what containment is for; this rule is for damage after it.
     """
@@ -1240,7 +1240,7 @@ def resolve_key(book, name, extra=()):
     """The key this name belongs under, folding OCR damage into one pilot.
 
     Presence has to use the same answer the book does, or a pilot flickers:
-    "Redron" one pass and "edro" the next would look like one leaving and
+    "Ravelin" one pass and "avel" the next would look like one leaving and
     another arriving.
     """
     key = pilot_key(name)
@@ -1311,7 +1311,8 @@ def pilot_key(name):
     return clean_field(name).casefold()
 
 
-def note_pilot(book, name, ship, corp, client, when=None, visit=True):
+def note_pilot(book, name, ship, corp, client, when=None, visit=True,
+               touch=None):
     """Fold one sighting into the book. Returns True if anything is new.
 
     Keyed on the name, because that is the thing that persists - a pilot swaps
@@ -1383,6 +1384,10 @@ def note_pilot(book, name, ship, corp, client, when=None, visit=True):
     if visit:
         who["seen"] += 1
     who["last_seen"] = when
+    # The caller cannot work out which key this landed on: the name is
+    # cleaned and near-matched in here, so say so rather than have it guess.
+    if touch is not None:
+        touch.add(key)
     return fresh
 
 
@@ -1391,7 +1396,7 @@ def field_samples(frame, box, scale, columns, pads=(0, 4, 12)):
 
     Windows OCR is deterministic for a given input but wildly sensitive to the
     crop it is handed, and not monotonically: the same saved row read
-    "OwlShadow Prospect" at 4 and 12px of margin and "os ect" at 0, 8, 16, 24
+    "Nightfall Prospect" at 4 and 12px of margin and "os ect" at 0, 8, 16, 24
     and 48. There is no margin that is simply better, so stop looking for one
     and take several readings of the same pixels instead.
 
@@ -1437,7 +1442,7 @@ def field_samples(frame, box, scale, columns, pads=(0, 4, 12)):
     def rank(value, votes):
         """Most letters first, then cleanest, then the majority.
 
-        Majority alone picked "Ame fer" over "Amelfer" - two crops lost the l
+        Majority alone picked "Ha vern" over "Halvern" - two crops lost the l
         and one did not, and the vote went with the pair. OCR drops characters
         and splits words; it does not invent letters. So the reading carrying
         the most letters and digits is the one closest to the screen, and the
@@ -4868,6 +4873,10 @@ def cmd_watch(args):
 
     sigs_book, sigs_dirty, sigs_saved = load_sigs(), False, time.time()
     book, book_dirty, book_saved = load_pilots(), False, time.time()
+    # Which records THIS watcher has changed since the last save. Both
+    # clients share the file and each holds the whole book in memory, so
+    # writing it whole means whichever saves last reverts the other's work.
+    touched = set()
     # Anything newer than the book's last save has not been folded in yet -
     # including a mark written while the watchers were down, which starting
     # from the newest line in the file would have discarded for good.
@@ -4881,10 +4890,6 @@ def cmd_watch(args):
     # sides have to be able to complete the pair.
     moves, pending_counts = [], []
     DOCK_WINDOW = 20.0
-    try:
-        book_stamp = os.path.getmtime(PILOTS)
-    except OSError:
-        book_stamp = None
 
     def note_move(key, direction, track=None, hole_at=None):
         """One pilot appearing on or leaving an overview."""
@@ -4893,6 +4898,7 @@ def cmd_watch(args):
         name = who["name"] if who else key
         flying = ""
         if who is not None:
+            touched.add(key)
             who["last_dir"] = direction
             who["last_by"] = TAG
             # Dropping off the overview means they warped, cloaked or took a
@@ -4975,13 +4981,14 @@ def cmd_watch(args):
             _, key = hit
             # Re-resolve: the move may have been filed under a spelling the
             # book has since folded in, and reporting the raw key printed a
-            # pilot that does not exist ("meki baz docked").
+            # pilot that does not exist ("sorel bade docked").
             key = resolve_key(book, key)
             who = book.get(key)
             name = who["name"] if who else key
             verb = "docked" if up else "undocked"
             flying = ""
             if who is not None:
+                touched.add(key)
                 flying = who.get("now_ship") or who.get("last_ship") or ""
                 who["last_note"] = f"{verb} {dt.datetime.now():%H:%M:%S}"
                 if up:                  # docked: the hull is put away
@@ -5141,7 +5148,7 @@ def cmd_watch(args):
             # twice out of the book, because the watcher was restarted between
             # the two sightings and the tally started again.
             # What they are in NOW, and where, are facts about this moment and
-            # must not wait for corroboration. Meki Raz undocked in a Buzzard
+            # must not wait for corroboration. A pilot undocked in a Buzzard
             # and the Pilots tab showed no ship at all, because the hull was a
             # first sighting and the "now" fields sat below the gate - along
             # with the distance the wormhole check needs. Corroboration is
@@ -5155,6 +5162,7 @@ def cmd_watch(args):
                 del seen_at[:-3]        # only the last few matter
             entry = book.get(key)
             if entry is not None and ship:
+                touched.add(key)
                 entry["now_ship"] = ship
                 entry["now_by"] = TAG
                 entry["now_at"] = dt.datetime.now().isoformat(timespec="seconds")
@@ -5170,9 +5178,13 @@ def cmd_watch(args):
             # A visit, not a poll: the roster is re-read every few seconds, so
             # counting every pass measured how long the client was open rather
             # than how often this pilot was actually seen.
-            if note_pilot(book, who, ship, f.get("corporation"), TAG,
-                          visit=key not in st["pilots_seen"]):
-                book_dirty = True
+            note_pilot(book, who, ship, f.get("corporation"), TAG,
+                       visit=key not in st["pilots_seen"], touch=touched)
+            # The sighting time moves on every pass, so the record is always
+            # dirty here. The old test only marked it when a ship or corp was
+            # NEW, which left last_seen sitting unsaved until something else
+            # forced a write.
+            book_dirty = True
             # What they are in NOW, as opposed to the tally of everything they
         st["arrived_names"] = []
         for key in here - st["pilots_seen"]:
@@ -5629,7 +5641,8 @@ def cmd_watch(args):
             if fresh_marks:
                 for at, what, key in fresh_marks:
                     marks_at = max(marks_at, at)
-                    who = book.get(resolve_key(book, key))
+                    key = resolve_key(book, key)
+                    who = book.get(key)
                     if who is None:
                         continue
                     if what == "docked":
@@ -5639,8 +5652,9 @@ def cmd_watch(args):
                                             f"{dt.datetime.now():%H:%M:%S}"
                                             f" (marked by hand)")
                     elif what == "forget":
-                        book.pop(resolve_key(book, key), None)
+                        book.pop(key, None)
                     log(f"   pilot mark applied: {what} {key!r}")
+                    touched.add(key)
                     book_dirty = True
 
             if sigs_dirty:
@@ -5648,26 +5662,25 @@ def cmd_watch(args):
                 sigs_dirty, sigs_saved = False, time.time()
 
             if book_dirty and time.time() - book_saved > 20:
-                # Someone editing the file while a watcher runs would otherwise
-                # lose the edit: the in-memory copy is flushed straight back
-                # over it. That is exactly how a pruned entry reappeared.
-                try:
-                    disk = os.path.getmtime(PILOTS)
-                except OSError:
-                    disk = None
-                if disk != book_stamp:
-                    log("   pilots.json changed on disk - reloading before save")
-                    fresh = load_pilots()
-                    for key, who in book.items():
-                        if key not in fresh:
-                            continue        # dropped outside; leave it dropped
-                        fresh[key] = who
-                    book = fresh
+                # Only the records this watcher has actually changed go out;
+                # every other one is left as it is on disk. Writing the whole
+                # book meant whichever client saved last reverted the other's
+                # work: a pilot seen, logged and recorded at 10:34 still read
+                # as docked the previous evening, because the other client
+                # re-asserted the copy it had loaded at startup. It also
+                # silently DROPPED a key that was not on disk yet, which is
+                # why a first-ever sighting never appeared.
+                # A key that is touched but gone from memory was forgotten by
+                # hand here, so it has to be removed rather than skipped.
+                disk = load_pilots()
+                for key in touched:
+                    if key in book:
+                        disk[key] = book[key]
+                    else:
+                        disk.pop(key, None)
+                book = disk
+                touched.clear()
                 save_pilots(book)
-                try:
-                    book_stamp = os.path.getmtime(PILOTS)
-                except OSError:
-                    book_stamp = None
                 book_dirty, book_saved = False, time.time()
 
             if time.time() >= next_beat:

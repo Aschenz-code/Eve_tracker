@@ -57,8 +57,8 @@ Alert profiles:
 | `silent` | no | no | no | logs only |
 
 Alerts are gathered for a moment before anything is said, so several changes
-at once become one announcement listing them - *"Mr AschenZ. 3 changes. new
-contact in overview. Redron Gnosis, OwlShadow Astero, Vega Junk Prospect"* -
+at once become one announcement listing them - *"Scout One. 3 changes. new
+contact in overview. Ravelin Gnosis, Nightfall Astero, Sorel Kade Prospect"* -
 rather than three voices talking over each other. Watchers also take turns, so
 two clients cannot speak at the same time.
 
