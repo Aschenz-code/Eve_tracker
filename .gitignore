@@ -31,7 +31,7 @@ config.json.prev
 CLIPBOARD_OWNER
 PAUSED.*
 pilots.json
-pilots.json.tmp
+pilots.json.*
 pilot_marks.log
 signatures.json
-signatures.json.tmp
+signatures.json.*
