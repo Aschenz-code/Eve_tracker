@@ -1562,7 +1562,14 @@ def reportable(label, settings, require=None):
     if ignored(label, settings):
         return False
     if require is not None and not require.match(row_key(label)):
-        return False
+        # A damaged reading of a real row, not a row of the wrong kind. The
+        # id repair IS the shape test for such a list - it turns a slashed
+        # zero read as O-with-stroke back into a digit using nothing but
+        # glyph shapes - so ask it, and re-test what it hands back. Given no
+        # known set it can only repair a reading, never adopt some other
+        # entry the reading merely prefixes, so this cannot fold one row onto
+        # another.
+        return bool(require.match(row_key(repair_sig_id(label) or "")))
     return True
 
 
