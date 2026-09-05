@@ -397,6 +397,14 @@ def find_best(search, template):
     is exactly how every row came to "depart" and "arrive" at once. Searching a
     small window instead returns 1.0000 at every offset.
     """
+    # A template with no variance correlates PERFECTLY with anything:
+    # TM_CCOEFF_NORMED divides by the template's standard deviation, so for a
+    # flat patch OpenCV hands back 1.0000 and it outscores every real match.
+    # The lit-pixel floor keeps such a row out of the list today, which is the
+    # only reason this has never bitten; a bar that admitted one would make
+    # every row on screen match it in preference to its own.
+    if template.size == 0 or template.min() == template.max():
+        return 0.0
     if (search.shape[0] < template.shape[0]
             or search.shape[1] < template.shape[1]):
         return ncc(search, template)
@@ -1733,16 +1741,28 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
         hits = st["pending"][prev][2] + 1 if prev is not None else 1
         label = st["pending"][prev][1] if prev is not None else label_fn(cell)
         if hits >= need:
-            # The label was read on the pass that FIRST saw the row and then
-            # carried along unchanged, so one damaged reading binned the row
-            # for good: a new signature read "abc-1 <junk>" on the pass that
-            # confirmed it and was dropped, while the very next pass read
-            # "ABC-123" perfectly. Take a second reading now and keep
-            # whichever one the list's own row shape accepts.
-            if not reportable(label, settings, st.get("require")):
-                second = label_fn(cell)
-                if reportable(second, settings, st.get("require")):
-                    label = second
+            # Read the row again NOW rather than trusting the reading taken
+            # when it was first seen. That first reading happens on the pass
+            # the list is still moving - inserting a signature pushes every
+            # row below it down a slot - so it can carry a NEIGHBOUR's text,
+            # and a well-formed neighbour id passes every test a real one
+            # would: a new signature was confirmed under the id of the row
+            # above it, dismissed as "changed, not new", and never announced.
+            # Preferring the reading that fits the row shape is not enough
+            # when the stale one fits it too. This costs nothing - the whole
+            # box is OCR'd once per pass either way - and the first reading
+            # stays as the fallback for when this one is unusable.
+            now_label = label_fn(cell)
+            if now_label and (reportable(now_label, settings, st.get("require"))
+                              or not reportable(label, settings,
+                                                st.get("require"))):
+                if now_label != label:
+                    # Say when the two readings disagree. This is a hypothesis
+                    # about a race that cannot be reproduced from a saved
+                    # frame, so let it prove or disprove itself in use: if it
+                    # never fires, the stale label was not the problem.
+                    st.setdefault("relabelled", []).append((label, now_label))
+                label = now_label
             st["next_id"] += 1
             st["rows"][f"px{st['next_id']}"] = {
                 "bitmap": exact, "text": label, "misses": 0,
@@ -5651,6 +5671,10 @@ def cmd_watch(args):
                                     log(f"   {name}: unreadable row changed "
                                         f"- no alert")
                             arrived = keep
+                        for was, now_is in st.pop("relabelled", []):
+                            log(f"   {name}: row first read as {was!r} reads "
+                                f"{now_is!r} on the pass that confirmed it "
+                                f"- using the later one")
                         binned = st.pop("binned", [])
                         if binned:
                             log(f"   {name}: {len(binned)} new row(s) did not "
