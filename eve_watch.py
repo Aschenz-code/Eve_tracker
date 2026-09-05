@@ -882,7 +882,19 @@ def repair_sig_id(raw, known=()):
     it uniquely prefixes: "ABC-6" can only be "ABC-600" if that is the only
     match, and ids are unique enough that a five-character prefix decides it.
     """
-    t = normalise_glyphs(clean_field(raw) or "").upper().replace(" ", "")
+    text = normalise_glyphs(clean_field(raw) or "").upper()
+    # A whole, well-formed id anywhere in the reading wins outright. The narrow
+    # id column is built from OCR WORDS, and a word loses its last character to
+    # an unmapped glyph often enough - "ABC-12<junk>" from the column while the
+    # row's own line read "ABC-123" - and rebuilding one from a head and a tail
+    # cannot put back a character that is not there. Only the prefix step could,
+    # and that adopts ids the file ALREADY holds: a signature whose first
+    # reading came up short was therefore never recordable at all. It was not
+    # known, so it could not be repaired, so it never became known.
+    whole = SIG_IN_LINE.search(text)
+    if whole:
+        return whole.group(0)
+    t = text.replace(" ", "")
     for dash in ("—", "–", "¯", "_", "~"):
         t = t.replace(dash, "-")
     if "-" not in t and len(t) >= 4:
@@ -1442,6 +1454,10 @@ def field_samples(frame, box, scale, columns, pads=(0, 4, 12), pitch=None):
                 slot = y
                 out[slot] = {}
             fields = split_columns(row.get("words") or [], columns, dx)
+            # The line as the engine itself reported it, not assembled from
+            # the words. They disagree: the words can drop a character the
+            # line kept. Underscored so it stays out of the named columns.
+            fields["_line"] = row.get("text") or ""
             for key, value in fields.items():
                 value = clean_field(value)
                 if not value:
@@ -1710,6 +1726,16 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
         hits = st["pending"][prev][2] + 1 if prev is not None else 1
         label = st["pending"][prev][1] if prev is not None else label_fn(cell)
         if hits >= need:
+            # The label was read on the pass that FIRST saw the row and then
+            # carried along unchanged, so one damaged reading binned the row
+            # for good: a new signature read "abc-1 <junk>" on the pass that
+            # confirmed it and was dropped, while the very next pass read
+            # "ABC-123" perfectly. Take a second reading now and keep
+            # whichever one the list's own row shape accepts.
+            if not reportable(label, settings, st.get("require")):
+                second = label_fn(cell)
+                if reportable(second, settings, st.get("require")):
+                    label = second
             st["next_id"] += 1
             st["rows"][f"px{st['next_id']}"] = {
                 "bitmap": exact, "text": label, "misses": 0,
@@ -1720,6 +1746,13 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
                 arrived.append(label)
             else:
                 st["junk"] = st.get("junk", 0) + 1
+                # A row that was seen, adopted and never mentioned. Silence
+                # here is why "why was this signature not reported" could
+                # only be answered by replaying the panel by hand. Only for
+                # a list with a known row shape - elsewhere this is scenery
+                # and deliberate.
+                if st.get("require") is not None and not ignored(label, settings):
+                    st.setdefault("binned", []).append(label)
         else:
             still.append((exact, label, hits))
     st["pending"] = still
@@ -1728,6 +1761,11 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
 
 SIG_LINE = re.compile(r"^([A-Z]{3}-\d{3})\t([^\t\n]*)\t?([^\t\n]*)", re.M)
 SIG_ID   = re.compile(r"^[A-Z]{3}-\d{3}$")
+# Bounded on both sides, so a reading with a spurious extra character
+# ("ABCD-123") does not quietly yield the wrong three letters. Those
+# fall through to the head-and-tail rebuild, which has always taken
+# the leading three.
+SIG_IN_LINE = re.compile(r"(?<![A-Z0-9])[A-Z]{3}-\d{3}(?![0-9])")
 SIG_ROW  = re.compile(r"^([A-Z]{3}-\d{3})\t(.*)$", re.M)
 
 
@@ -5111,6 +5149,8 @@ def cmd_watch(args):
                 continue
             sid = repair_sig_id(f.get("id"), mine)
             if not sid:
+                sid = repair_sig_id(f.get("_line"), mine)
+            if not sid:
                 continue                # not a signature row, or unreadable
             seen_any = True
             seen_ids.add(sid)
@@ -5194,7 +5234,8 @@ def cmd_watch(args):
             # vote tallies under "_votes", and joining those in crashed every
             # watcher on its first overview pass.
             whole = " ".join(v for k, v in f.items()
-                             if k != "_votes" and isinstance(v, str) and v)
+                             if not k.startswith("_")
+                             and isinstance(v, str) and v)
             if ignored(whole, st["cfg"]) or is_noise_row(whole):
                 continue
             who = clean_field(f.get("name"))
@@ -5519,7 +5560,12 @@ def cmd_watch(args):
                         _idf = None
                         if name.startswith("sigs") and st["columns"]:
                             def _idf(cell, _st=st, _lab=_label):
-                                return repair_sig_id(_lab(cell), sigs_book)
+                                # This client's ids, not the whole book -
+                                # keyed by client, it offered the repair a
+                                # choice of client names to match against.
+                                return repair_sig_id(
+                                    _lab(cell),
+                                    sigs_book.get(TAG or "(unknown)", {}))
                         arrived, departed = reconcile_pixels(
                             st, frame, box, thr, st["cfg"], _label, id_fn=_idf)
                         # Three OCR passes at 313ms, and on a quiet grid they
@@ -5576,6 +5622,12 @@ def cmd_watch(args):
                                     log(f"   {name}: unreadable row changed "
                                         f"- no alert")
                             arrived = keep
+                        binned = st.pop("binned", [])
+                        if binned:
+                            log(f"   {name}: {len(binned)} new row(s) did not "
+                                f"look like a {name.rstrip('0123456789')} entry "
+                                f"- no alert: "
+                                + " | ".join(repr(b) for b in binned[:4]))
                         reasons = st.pop("why", [])
                         for i, gone in enumerate(departed):
                             why = reasons[i] if i < len(reasons) else ""
