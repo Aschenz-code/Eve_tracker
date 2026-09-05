@@ -203,10 +203,21 @@ def regions_for(regions, window_title):
     return [r for r in regions if r.get("window", window_title) == window_title]
 
 
-def pick_regions(cfg, name):
+def pick_regions(cfg, name, client=None):
+    """The regions a command should act on, narrowed by name and by client.
+
+    Two clients can hold a region of the SAME name - a structure counter on
+    each - so a name alone stops identifying one. Without the client filter
+    `learn` could only report that the name was ambiguous, and had no way to
+    say which of the two was meant.
+    """
     regions = cfg["regions"]
     if not regions:
         sys.exit("No regions configured. Run:  python eve_watch.py select")
+    if client:
+        want = [r for r in regions if client.lower() in (r.get("window") or "").lower()]
+        if want:
+            regions = want
     if name:
         hit = [r for r in regions if r["name"] == name]
         if not hit:
@@ -217,6 +228,19 @@ def pick_regions(cfg, name):
 
 def slug(text):
     return re.sub(r"[^A-Za-z0-9]+", "_", text or "").strip("_").lower()
+
+
+def anchor_write_path(name, window=None):
+    """Where a NEW anchor goes: always this client's own file.
+
+    anchor_path falls back to the pre-multi-client filename when a client has
+    no anchor of its own, which is right for reading and wrong for writing.
+    Selecting a second client's "structure" would have SAVED OVER the first
+    client's anchor and left it hunting for a picture of the wrong window.
+    """
+    if window:
+        return os.path.join(HERE, f"anchor_{slug(window)}_{name}.png")
+    return os.path.join(HERE, f"anchor_{name}.png")
 
 
 def anchor_path(name, window=None):
@@ -3122,10 +3146,16 @@ def cmd_select(args):
         anchor = {"left": int(rl + anc[0] / zoom), "top": int(rt + anc[1] / zoom),
                   "width": max(6, int(anc[2] / zoom)), "height": max(6, int(anc[3] / zoom))}
         region["anchor"] = anchor
-        Image.fromarray(to_gray(crop(frame, anchor))).save(anchor_path(args.name, win["title"]))
+        Image.fromarray(to_gray(crop(frame, anchor))).save(
+            anchor_write_path(args.name, win["title"]))
 
     cfg = load_config()
-    cfg["regions"] = [r for r in cfg["regions"] if r["name"] != args.name]
+    # Name AND window. Filtering on the name alone deleted every region so
+    # called on EVERY client, so adding a structure counter to a second client
+    # would have silently dropped the first one's.
+    cfg["regions"] = [r for r in cfg["regions"]
+                      if not (r["name"] == args.name
+                              and r.get("window") == win["title"])]
     cfg["regions"].append(region)
     save_config(cfg)
 
@@ -3155,7 +3185,7 @@ def cmd_select(args):
 
 def cmd_shot(args):
     cfg = load_config()
-    regions = pick_regions(cfg, args.name)
+    regions = pick_regions(cfg, args.name, args.client)
     win = resolve_window(args.client or regions[0]["window"])
     regions = regions_for(regions, win["title"])
     if not regions:
@@ -3183,7 +3213,7 @@ def cmd_list(args):
 def cmd_learn(args):
     """Teach the watcher what the region looks like at a known value."""
     cfg = load_config()
-    regions = pick_regions(cfg, args.name)
+    regions = pick_regions(cfg, args.name, args.client)
     if len(regions) > 1:
         sys.exit(f"Say which region: --name {[r['name'] for r in regions]}")
     reg = regions[0]
@@ -4748,7 +4778,7 @@ def _watcher_pids():
 
 def cmd_tune(args):
     cfg = load_config()
-    regions = pick_regions(cfg, args.name)
+    regions = pick_regions(cfg, args.name, args.client)
     win = resolve_window(args.client or regions[0]["window"])
     regions = regions_for(regions, win["title"])
     thr = cfg["settings"]["threshold"]
@@ -4830,7 +4860,7 @@ def cmd_watch(args):
     apply_profile(args, mode)
     mode_stamp = os.path.getmtime(MODEFILE) if os.path.exists(MODEFILE) else 0
     global TAG
-    regions = pick_regions(cfg, args.name)
+    regions = pick_regions(cfg, args.name, args.client)
     win = resolve_window(args.client or regions[0]["window"])
     # With several clients configured, only watch the ones belonging to this window.
     mine = [r for r in regions_for(regions, win["title"])
