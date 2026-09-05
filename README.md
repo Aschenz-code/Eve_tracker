@@ -103,6 +103,23 @@ Halving from 1 s is nearly free because the standing cost is the periodic OCR,
 which `roster_period` gates and which does not follow the poll rate. Below that
 the per-pass work starts to show.
 
+## Ignoring things you do not want to hear about
+
+`ignore` in a region's config drops any row whose text contains one of the
+listed fragments - no alert, no log line, no entry in `pilots.json`. It starts
+out holding permanent scenery, and a friendly you would rather not be told
+about belongs there too.
+
+Match on a **fragment, not the full name**. The test is a plain case-insensitive
+substring, and OCR drops glyphs: a corp mate whose name ends "...NoBull" was
+read as "...NoBu" often enough that the full spelling let them through. Trim
+the last character or two and the entry still identifies them:
+
+    "ignore": ["Fortizar", "Sun", "Wormhole", "SomePilo", "Other Nam"]
+
+A badly damaged reading - a glyph lost from the middle rather than the end -
+can still get past it and alert once.
+
 ## Docking
 
 If a client watches both an overview and the structure counter, the two are

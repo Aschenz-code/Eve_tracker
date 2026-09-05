@@ -1405,7 +1405,7 @@ def note_pilot(book, name, ship, corp, client, when=None, visit=True,
     return fresh
 
 
-def field_samples(frame, box, scale, columns, pads=(0, 4, 12)):
+def field_samples(frame, box, scale, columns, pads=(0, 4, 12), pitch=None):
     """Read the same rows several times at different crops, keep the best.
 
     Windows OCR is deterministic for a given input but wildly sensitive to the
@@ -1466,6 +1466,43 @@ def field_samples(frame, box, scale, columns, pads=(0, 4, 12)):
         stray, _ = name_score(value)
         letters = sum(c.isalnum() for c in value)
         return (letters, -stray, votes, value.count(" "))
+
+    # A row the panel-wide read could not name gets one more look on its own.
+    # Windows OCR is handed the whole list at once here, and on a hard row -
+    # the selected one, whose highlight leaves its text at 140 levels of
+    # contrast against the 216 of the rest - it drops the leading columns:
+    # "Selena Kyle Re Tengu" came back as "Re" and "Ten u" from every one of
+    # the three crops, so the row failed the name check and a Tengu that
+    # alerted was never recorded. Measured on that row, the vertical extent is
+    # what does it, not the horizontal: a strip holding exactly this row reads
+    # "Selena Kyle Re" and "Tengu" cleanly at any width, and degrades steadily
+    # as the strip grows to two, three and four pixels beyond the row. So cut
+    # to the row and read again. Only for rows that came out unusable, so a
+    # quiet list costs nothing.
+    if pitch:
+        for slot, fields in list(out.items()):
+            tally = (fields.get("_votes") or {}).get("name") or {}
+            best = max(tally, key=lambda v: rank(v, tally[v]), default="")
+            if sum(c.isalnum() for c in best) >= 3:
+                continue
+            left = max(0, box["left"] - reach)
+            top = int(box["top"] + slot - pitch // 2)
+            if top < 0:
+                continue
+            dx = box["left"] - left
+            strip = crop(frame, {"left": left, "top": top,
+                                 "width": box["width"] + dx,
+                                 "height": int(pitch)})
+            if strip.shape[0] < 8 or strip.shape[1] < 8:
+                continue
+            for row in ocr_rows(to_image(strip), scale):
+                for key, value in split_columns(row.get("words") or [],
+                                                columns, dx).items():
+                    value = clean_field(value)
+                    if not value:
+                        continue
+                    votes = fields.setdefault("_votes", {}).setdefault(key, {})
+                    votes[value] = votes.get(value, 0) + 1
 
     for slot, fields in out.items():
         for key, tally in (fields.get("_votes") or {}).items():
@@ -5107,7 +5144,8 @@ def cmd_watch(args):
         just as much a sighting as one that warps in.
         """
         nonlocal book_dirty
-        best = field_samples(frame, box, s["ocr_scale"], st["columns"])
+        best = field_samples(frame, box, s["ocr_scale"], st["columns"],
+                             pitch=st["pitch"])
         here = set()
         # Did any row that looks like a pilot fail to corroborate itself? If
         # so the caller must come straight back rather than wait out the slow
