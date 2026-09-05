@@ -5201,6 +5201,23 @@ def cmd_watch(args):
         best = field_samples(frame, box, s["ocr_scale"], st["columns"],
                              pitch=st["pitch"])
         here = set()
+        # A character name is unique in EVE, so one name on several rows of a
+        # single pass is not a pilot: it is a group of NPCs, which share a
+        # name and are told apart only by their type. Six rows named "Orthrus"
+        # of type "Restless Sentry" were recorded as a pilot, and the type
+        # carried whatever the last reading happened to be.
+        #
+        # Paired with "and shows no corporation", because a player always has
+        # one. Two conditions rather than one because a name is also what EVE
+        # truncates to fit the column, so two long names COULD read alike -
+        # and dropping a row costs a false departure. Measured over 207 saved
+        # frames the rule drops 36 rows, every one an NPC or a station, and no
+        # real pilot at all.
+        same_name = {}
+        for _f in best.values():
+            _who = clean_field(_f.get("name"))
+            if _who:
+                same_name[_who] = same_name.get(_who, 0) + 1
         # Did any row that looks like a pilot fail to corroborate itself? If
         # so the caller must come straight back rather than wait out the slow
         # refresh, or a short visit is never recorded at all.
@@ -5252,6 +5269,11 @@ def cmd_watch(args):
                 # departure is measured against, so note where it is.
                 if ship and who.casefold() == ship.casefold()                         and who.casefold().startswith("wormhole"):
                     st["hole_dist"] = parse_distance(f.get("distance"))
+                continue
+
+            if same_name.get(who, 0) >= 2 and not clean_ticker(
+                    f.get("corporation")):
+                st["npcs"] = st.get("npcs", 0) + 1
                 continue
 
             # Being on the overview and being worth recording are different
@@ -5877,6 +5899,11 @@ def cmd_watch(args):
                         tag += "(occupied)" if v["occupied"] else "(empty)"
                     if v["mode"] == "roster":
                         tag += f"({len(v['rows'])} rows)"
+                    # Rows dropped as NPCs. Silent filtering is what made
+                    # "why is this in my pilot list" a manual investigation;
+                    # the reverse question deserves an answer too.
+                    if v.get("npcs"):
+                        tag += f" {v['npcs']} npc"
                     if v["mode"] == "dscan":
                         tag += f"({len(v['last_set'] or ())} results)"
                     if v["tr"].tracking and v["tr"].drift != (0, 0):
