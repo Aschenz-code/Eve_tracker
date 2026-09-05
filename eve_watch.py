@@ -1471,11 +1471,11 @@ def field_samples(frame, box, scale, columns, pads=(0, 4, 12), pitch=None):
     # Windows OCR is handed the whole list at once here, and on a hard row -
     # the selected one, whose highlight leaves its text at 140 levels of
     # contrast against the 216 of the rest - it drops the leading columns:
-    # "Selena Kyle Re Tengu" came back as "Re" and "Ten u" from every one of
+    # "Marla Venn Re Tengu" came back as "Re" and "Ten u" from every one of
     # the three crops, so the row failed the name check and a Tengu that
     # alerted was never recorded. Measured on that row, the vertical extent is
     # what does it, not the horizontal: a strip holding exactly this row reads
-    # "Selena Kyle Re" and "Tengu" cleanly at any width, and degrades steadily
+    # "Marla Venn Re" and "Tengu" cleanly at any width, and degrades steadily
     # as the strip grows to two, three and four pixels beyond the row. So cut
     # to the row and read again. Only for rows that came out unusable, so a
     # quiet list costs nothing.
