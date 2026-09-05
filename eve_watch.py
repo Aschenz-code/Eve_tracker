@@ -1665,11 +1665,17 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
                 # taking it OUT of `fresh`: leaving it there re-bound the row
                 # and then confirmed the same cell as an arrival, so one row
                 # was announced again and again.
-                for entry in list(fresh):
+                # By index, not by value: list.remove compares with ==, and
+                # these entries carry numpy arrays, so comparing one against a
+                # non-matching entry raises rather than returning False. It
+                # only bit when the wanted cell was not the first unclaimed
+                # one - CPython checks identity before equality - which is why
+                # it took two crashes a day to show up.
+                for idx, entry in enumerate(fresh):
                     se, ex, cell = entry
                     if id_fn(cell) != want:
                         continue
-                    fresh.remove(entry)
+                    del fresh[idx]
                     st["rows"][k]["bitmap"] = ex
                     st["rows"][k]["misses"] = 0
                     st["rows"][k]["text"] = label_fn(cell) or st["rows"][k]["text"]
@@ -4909,6 +4915,7 @@ def cmd_watch(args):
     next_beat = time.time() + 60
     last_rec = 0.0
     stale_warned = False
+    blind_since = 0.0
     paused = False
     current_hwnd = win["hwnd"]
     last_reconnect = 0.0
@@ -5316,8 +5323,17 @@ def cmd_watch(args):
 
             if age > 10 or cap.minimized:
                 if not stale_warned:
-                    why = "minimised" if cap.minimized else f"no new frames for {age:.0f}s"
-                    log(f"!! EVE is {why} - BLIND until it renders again.")
+                    why = ("minimised" if cap.minimized
+                           else f"delivered no frame for {age:.0f}s")
+                    # What the window was doing at the time. A client that
+                    # stops presenting looks identical from here to one whose
+                    # capture session has quietly died, and without the state
+                    # there is nothing to tell them apart afterwards.
+                    blind_since = time.time() - age
+                    shown = bool(user32.IsWindowVisible(current_hwnd))
+                    log(f"!! EVE {why} - BLIND until it renders again. "
+                        f"[visible={shown} minimised={cap.minimized} "
+                        f"hwnd={current_hwnd}]")
                     record_event(started, "-", "blind", why, obs_dir=obs_dir)
                     threading.Thread(target=beep, args=(1,), daemon=True).start()
                     stale_warned = True
@@ -5355,8 +5371,12 @@ def cmd_watch(args):
                 time.sleep(interval)
                 continue
             if stale_warned:
-                log("   ...frames are back.")
-                record_event(started, "-", "resumed", obs_dir=obs_dir)
+                # How long it actually lasted. "Frames are back" alone left
+                # the length of the gap to be worked out from two timestamps.
+                dark = time.time() - blind_since
+                log(f"   ...frames are back after {dark:.0f}s dark.")
+                record_event(started, "-", "resumed", f"{dark:.0f}s",
+                             obs_dir=obs_dir)
                 stale_warned = False
 
             for r in regions:
