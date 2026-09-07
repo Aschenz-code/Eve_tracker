@@ -1332,6 +1332,16 @@ def ship_alike(a, b):
     return difflib.SequenceMatcher(None, ja, jb).ratio() >= 0.75
 
 
+def reading_grade(text):
+    """How good a reading is, lowest first: fewest stray marks, then longest.
+
+    The same order every other reading here is judged by - OCR drops and
+    mangles characters, it does not invent clean ones.
+    """
+    stray, _ = name_score(text)
+    return (stray, -sum(c.isalnum() for c in text))
+
+
 def backing_votes(tally, winner, alike):
     """How many crops read something that IS the winner, dropped glyphs and all.
 
@@ -1777,16 +1787,21 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
             # box is OCR'd once per pass either way - and the first reading
             # stays as the fallback for when this one is unusable.
             now_label = label_fn(cell)
-            if now_label and (reportable(now_label, settings, st.get("require"))
-                              or not reportable(label, settings,
-                                                st.get("require"))):
-                if now_label != label:
-                    # Say when the two readings disagree. This is a hypothesis
-                    # about a race that cannot be reproduced from a saved
-                    # frame, so let it prove or disprove itself in use: if it
-                    # never fires, the stale label was not the problem.
+            if now_label and now_label != label:
+                # Which of the two readings to keep. Taking the LATER one
+                # outright was wrong: three times over it threw away a clean
+                # "<name> Astero AXAPI" for a damaged reading of the same row
+                # that had lost the first letter and gained a bracket. Judge
+                # them the way every other reading here is judged and let the
+                # later one win only a TIE - which is exactly what the stale
+                # neighbour is: two equally well-formed ids, one of them
+                # belonging to the row above.
+                ok_now = reportable(now_label, settings, st.get("require"))
+                ok_was = reportable(label, settings, st.get("require"))
+                better = reading_grade(now_label) <= reading_grade(label)
+                if (ok_now and not ok_was) or (ok_now == ok_was and better):
                     st.setdefault("relabelled", []).append((label, now_label))
-                label = now_label
+                    label = now_label
             st["next_id"] += 1
             st["rows"][f"px{st['next_id']}"] = {
                 "bitmap": exact, "text": label, "misses": 0,
