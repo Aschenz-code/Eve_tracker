@@ -132,6 +132,10 @@ DEFAULTS = {
     "clip": 0,               # zero every pixel below this before correlating
     "reconnect_after": 30,   # seconds without frames before hunting a new window
     "max_drift": None,       # px an anchor may be found from where it was set up
+    # A webhook url is a credential: anyone holding it can post to that
+    # channel. Passed as an argument it shows in every process listing on the
+    # machine, so it belongs in the config, which is not shared.
+    "webhook": None,
     "voice_name": None,      # substring of a TTS voice name, e.g. "Mark"
     "clipboard_sigs": True,  # parse EVE probe-scanner pastes for exact signature data
     "nag_until_ack": False,  # keep repeating while an unacknowledged popup is up
@@ -2277,7 +2281,12 @@ def post_webhook(url, text):
     try:
         req = urllib.request.Request(
             url, data=json.dumps({"content": text}).encode(),
-            headers={"Content-Type": "application/json"})
+            # Discord sits behind Cloudflare, which refuses the default
+            # "Python-urllib" agent outright: every post came back 403 with
+            # Cloudflare error 1010, so this had never once delivered a
+            # message. Naming the client gets a 204.
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "eve-watch (local tool, 1.0)"})
         urllib.request.urlopen(req, timeout=10).read()
     except Exception as exc:
         log(f"  webhook failed: {exc}")
@@ -2320,7 +2329,7 @@ def _say_batch(batch):
     """Announce one gathered batch as a single alert."""
     opts = batch[-1][2]
     tag = f"{TAG}. " if TAG and batch[0][3] else ""
-    items = [raw for raw, _body, _o, _a in batch]
+    items = [raw for raw, _body, _o, _a, _p in batch]
     if len(items) == 1:
         phrase = tag + items[0]
     else:
@@ -2359,6 +2368,17 @@ def _say_batch(batch):
             body = f"Client: {TAG}\n\n{body}"
         threading.Thread(target=popup, args=(title, body), daemon=True).start()
 
+    # Relay only what asked to be relayed. Everything used to go, so a
+    # channel got the structure counter ticking and "watcher lost the overview
+    # region" alongside the contacts - and a batch holding both carried both in
+    # the one line. An alert naming no relay text is spoken and not sent.
+    relay = [p for _r, _b, _o, _a, p in batch if p]
+    if opts.webhook and relay:
+        threading.Thread(target=post_webhook,
+                         args=(opts.webhook,
+                               "**EVE watch** - " + "\n".join(relay)),
+                         daemon=True).start()
+
     if not getattr(opts, "beeps", True) and not opts.popup and not opts.voice:
         return                      # --quiet: log and snapshot, make no noise
 
@@ -2379,10 +2399,6 @@ def _say_batch(batch):
             break
         time.sleep(0.6)
 
-    if opts.webhook:
-        threading.Thread(target=post_webhook,
-                         args=(opts.webhook, f"**EVE watch** - {phrase}"),
-                         daemon=True).start()
 
 
 def _alert_loop():
@@ -2404,7 +2420,7 @@ def _alert_loop():
             log(f"  alert failed: {exc}")
 
 
-def raise_alarm(phrase, body, opts, attribute=True):
+def raise_alarm(phrase, body, opts, attribute=True, post=None):
     """Queue an alert. One announcer speaks them, gathering what arrives close
     together into a single announcement.
 
@@ -2420,7 +2436,7 @@ def raise_alarm(phrase, body, opts, attribute=True):
     if _alert_worker is None:
         _alert_worker = threading.Thread(target=_alert_loop, daemon=True)
         _alert_worker.start()
-    _alerts.put((phrase, body, opts, attribute))
+    _alerts.put((phrase, body, opts, attribute, post))
 
 def drag_box(pil_img, caption, optional=False):
     """Show an image, let the user drag a box; return (l, t, w, h) in image px."""
@@ -4933,6 +4949,8 @@ def cmd_watch(args):
         s["interval"])
     sensitivity = args.sensitivity or s["sensitivity"]
     stable_needed = args.stable or s["stable"]
+    if not getattr(args, "webhook", None):
+        args.webhook = s.get("webhook") or None
     thr = s["threshold"]
     obs_dir = args.obs_dir or s.get("obs_dir")
     global VOICE
@@ -5103,7 +5121,8 @@ def cmd_watch(args):
     known_sigs = {}
     clip_primed = False
 
-    def fire(name, st, box, frame, event, detail, phrase=None, alarm=True):
+    def fire(name, st, box, frame, event, detail, phrase=None, alarm=True,
+             post=None):
         tag = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         shot = os.path.join(EVENT_SHOTS, f"{name}_{tag}.png")
         to_image(context_crop(frame, box, s["pad"])).save(shot)
@@ -5115,7 +5134,8 @@ def cmd_watch(args):
         at = f"  [{vid} @ {off}]" if vid else ""
         log(f"*** {event.upper()} in {name!r}: {detail}  ->  {os.path.basename(shot)}{at}")
         if alarm:
-            raise_alarm(phrase or st["say"], f"{name}: {detail}\n\n{shot}", args)
+            raise_alarm(phrase or st["say"], f"{name}: {detail}\n\n{shot}", args,
+                        post=post)
 
     sigs_book, sigs_dirty, sigs_saved = load_sigs(), False, time.time()
     book, book_dirty, book_saved = load_pilots(), False, time.time()
@@ -5826,8 +5846,19 @@ def cmd_watch(args):
                             phrase = (f"{st['say']}. {shown[0]}"
                                       if len(shown) == 1
                                       else f"{st['say']}. {len(shown)} new")
+                            # Speech shortens several arrivals to "3 new" to
+                            # stay listenable; a relayed line has no reason to
+                            # drop the names and hulls.
+                            who = f"{TAG}: " if TAG else ""
+                            if name.startswith("overview"):
+                                relay = who + " | ".join(shown)
+                            elif name.startswith("sigs"):
+                                relay = (f"{who}new signature: "
+                                         + " | ".join(shown))
+                            else:
+                                relay = None
                             fire(name, st, box, frame, "arrive", detail, phrase,
-                                 alarm=st["alert"])
+                                 alarm=st["alert"], post=relay)
                         continue
 
                     seen, malformed = {}, []
@@ -5980,7 +6011,10 @@ def cmd_watch(args):
                             raise_alarm(
                                 f"{len(fresh)} new signature"
                                 f"{'s' if len(fresh) > 1 else ''}",
-                                f"New signature(s):\n\n{detail}", args, attribute=False)
+                                f"New signature(s):\n\n{detail}", args,
+                                attribute=False,
+                                post=(f"{TAG}: " if TAG else "")
+                                     + f"new signature: {detail}")
                         if gone:
                             record_event(started, "clipboard", "sig_gone",
                                          ", ".join(sorted(gone)), obs_dir=obs_dir)
