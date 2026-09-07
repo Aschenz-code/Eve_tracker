@@ -2524,6 +2524,22 @@ HEADER_NAMES = ["distance", "name", "type", "corporation", "alliance",
                 "velocity", "id", "group", "signal"]
 
 
+def keep_ignores(default, existing):
+    """The panel's own entries plus whatever was added to this region by hand.
+
+    Order follows the default first so a re-calibrated region reads the same
+    way as a fresh one, and case-insensitively deduplicated because `ignored`
+    matches that way.
+    """
+    out, seen = [], set()
+    for entry in list(default) + list(existing or []):
+        low = (entry or "").casefold()
+        if entry and low not in seen:
+            seen.add(low)
+            out.append(entry)
+    return out
+
+
 def classify_headers(found):
     """Which kind of panel a set of column headers belongs to."""
     if found & {"id", "group", "signal"}:
@@ -2982,6 +2998,13 @@ def cmd_calibrate(args):
         p["geo"] = geo
 
     regions, report = [], []
+    # What this client's regions already say to ignore. Calibration measures
+    # geometry; the ignore list is not a measurement but a standing decision -
+    # scenery to skip, corp mates not to be told about - and rebuilding the
+    # region from the panel defaults threw it away. Five friendlies added by
+    # hand survived on the one client that had not been recalibrated since.
+    was_ignoring = {r["name"]: list(r.get("ignore") or [])
+                    for r in cfg["regions"] if r.get("window") == win["title"]}
     for p in proposals:
         geo, spec = p["geo"], p["spec"]
         if geo is None:
@@ -3016,7 +3039,8 @@ def cmd_calibrate(args):
                         for k, x in (geo.get("columns") or {}).items()},
             "anchor": anchor, "key_width": geo["key_width"],
             "label_width": geo.get("label_width"),
-            "max_drift": drift, "ignore": list(spec["ignore"]),
+            "max_drift": drift, "ignore": keep_ignores(
+                spec["ignore"], was_ignoring.get(p["label"])),
             "zoom": True, "alert": spec["mode"] != "dscan",
             "say": spec["say"].format(label=p["label"]),
         }
