@@ -4622,8 +4622,11 @@ def cmd_supervise(args):
             log(f"!! supervisor: {len(left)} stray watcher(s) survived: {left}. "
                 f"Alerts may repeat - stop them by hand.")
 
-    children = {}                       # title -> Popen
+    children = {}                       # title -> Popen, live watchers only
     prints = {}                         # title -> fingerprint it was started with
+    starts = {}                         # title -> when its watcher was spawned
+    trouble = {}                        # title -> (do not retry before, delay)
+    absent = set()                      # clients reported as not running
     cfg_stamp = os.path.getmtime(CONFIG) if os.path.exists(CONFIG) else 0
 
     def spawn(title):
@@ -4637,7 +4640,34 @@ def cmd_supervise(args):
         if args.quiet:
             cmd.append("--quiet")
         log(f"supervisor: starting watcher for {title!r}")
+        starts[title] = time.time()
         return subprocess.Popen(cmd, cwd=HERE, creationflags=CREATE_NO_WINDOW)
+
+    def start_if_sane(title):
+        """A watcher, unless the client is not running or it keeps dying.
+
+        A selected client that is not logged in made the watcher exit at once
+        with "no visible window", and this restarted it every few seconds for
+        as long as the client stayed shut - thousands of log lines saying the
+        same thing, and a real fault would have spun just as fast.
+        """
+        due, _delay = trouble.get(title, (0.0, 0.0))
+        if time.time() < due:
+            return None
+        try:
+            there = any(h["title"] == title for h in list_windows(title))
+        except Exception:
+            there = True                # cannot tell; let the watcher decide
+        if not there:
+            if title not in absent:
+                absent.add(title)
+                log(f"supervisor: {title!r} is not running - waiting for it "
+                    f"rather than restarting a watcher that cannot start")
+            return None
+        if title in absent:
+            absent.discard(title)
+            log(f"supervisor: {title!r} is running again")
+        return spawn(title)
 
     def stop(title):
         prints.pop(title, None)
@@ -4673,12 +4703,28 @@ def cmd_supervise(args):
                 if title not in wanted:
                     stop(title)
                 elif children[title].poll() is not None:
-                    log(f"!! supervisor: watcher for {title!r} exited "
-                        f"(code {children[title].returncode}) - restarting")
-                    children[title] = spawn(title)
+                    code = children[title].returncode
+                    lived = time.time() - starts.get(title, 0.0)
+                    del children[title]
+                    if lived < 20:
+                        # Died on startup. Back off, doubling, so a fault that
+                        # cannot be recovered from does not fill the log.
+                        _due, delay = trouble.get(title, (0.0, 0.0))
+                        delay = min(300.0, max(5.0, delay * 2))
+                        trouble[title] = (time.time() + delay, delay)
+                        log(f"!! supervisor: watcher for {title!r} exited "
+                            f"(code {code}) after {lived:.0f}s - next try in "
+                            f"{delay:.0f}s")
+                    else:
+                        trouble.pop(title, None)
+                        log(f"!! supervisor: watcher for {title!r} exited "
+                            f"(code {code}) - restarting")
             for title in wanted:
                 if title not in children:
-                    children[title] = spawn(title)
+                    proc = start_if_sane(title)
+                    if proc is None:
+                        continue
+                    children[title] = proc
                     prints[title] = client_fingerprint(load_config(), title)
             if not children:
                 log("supervisor: nothing to monitor - add a client with "
