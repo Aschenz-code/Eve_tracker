@@ -5287,6 +5287,17 @@ def cmd_watch(args):
         # so the caller must come straight back rather than wait out the slow
         # refresh, or a short visit is never recorded at all.
         unsure = False
+        def mark_now(key, hull):
+            """Record what a pilot is in RIGHT NOW. True if it landed."""
+            entry = book.get(key)
+            if entry is None or not hull:
+                return False
+            touched.add(key)
+            entry["now_ship"] = hull
+            entry["now_by"] = TAG
+            entry["now_at"] = dt.datetime.now().isoformat(timespec="seconds")
+            return True
+
         # What each row was read as flying THIS pass. The arrival alert
         # cannot go to the record for it: a first-ever pilot has no record
         # yet at the point the hull is wanted.
@@ -5372,12 +5383,7 @@ def cmd_watch(args):
                 del seen_at[:-3]        # only the last few matter
             if ship:
                 seen_hull[key] = ship
-            entry = book.get(key)
-            if entry is not None and ship:
-                touched.add(key)
-                entry["now_ship"] = ship
-                entry["now_by"] = TAG
-                entry["now_at"] = dt.datetime.now().isoformat(timespec="seconds")
+            if mark_now(key, ship):
                 book_dirty = True
 
             # Corroboration has to be judged the way the winner was
@@ -5409,6 +5415,12 @@ def cmd_watch(args):
             # NEW, which left last_seen sitting unsaved until something else
             # forced a write.
             book_dirty = True
+            # A pilot the book has never held - or one that was forgotten and
+            # has come back - does not exist yet when the block above looks
+            # for a record to put the hull in, so "in space now" stayed empty
+            # until the next column pass twenty-five seconds later, and for a
+            # visit shorter than that, for good. note_pilot has just made it.
+            mark_now(key, ship)
 
         st["pilots_unsure"] = unsure
         st["arrived_names"] = []
