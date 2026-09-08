@@ -2308,6 +2308,64 @@ def popup(title, msg):
         _popup_busy.clear()
 
 
+RELAY_REPEAT = 150.0        # an identical relay is dropped inside this
+RELAY_BURST  = 15           # most relays in RELAY_WINDOW
+RELAY_WINDOW = 60.0
+_relay_when = {}            # message -> when it last went out
+_relay_sent = []            # when each recent relay went out
+_relay_lock = threading.Lock()
+
+
+def relay_ok(text):
+    """Whether to relay this now. Returns (send, why not).
+
+    Two guards, for two ways a channel gets flooded. A row scoring just under
+    the identity bar leaves and arrives over and over - one Drifter did it
+    three times in thirty seconds - and every pass is the same message, so an
+    identical one is dropped for a while. And a genuinely busy grid can outrun
+    what Discord accepts, so there is a ceiling per minute; going over it is
+    logged rather than swallowed, because a dropped contact matters.
+    """
+    now = time.time()
+    with _relay_lock:
+        for msg, when in list(_relay_when.items()):
+            if now - when > RELAY_REPEAT:
+                del _relay_when[msg]
+        seen = _relay_when.get(text)
+        if seen is not None:
+            return False, f"same message {now - seen:.0f}s ago"
+        _relay_sent[:] = [t for t in _relay_sent if now - t < RELAY_WINDOW]
+        if len(_relay_sent) >= RELAY_BURST:
+            return False, (f"{len(_relay_sent)} already sent in the last "
+                           f"{RELAY_WINDOW:.0f}s")
+        _relay_when[text] = now
+        _relay_sent.append(now)
+    return True, ""
+
+
+def relay_text(kind, items, note):
+    """The message body for a relay. `kind` is "sigs" or "overview"."""
+    nl = chr(10)
+    if kind == "sigs":
+        head = ("**New sig spawned**" if len(items) == 1
+                else "**New sigs spawned**")
+        lines = [head] + [str(i) for i in items]
+        if note:
+            lines.append(note)
+        return nl.join(lines)
+    head = "**New contact**" if len(items) == 1 else "**New contacts**"
+    blocks = []
+    for who, hull in items:
+        one = [f"Name: {who}"]
+        if hull:
+            one.append(f"Ship: {hull}")
+        blocks.append(nl.join(one))
+    out = [head, (nl + nl).join(blocks)]
+    if note:
+        out.append(f"Where: {note}")
+    return nl.join(out)
+
+
 def post_webhook(url, text):
     import urllib.request
     try:
@@ -2406,10 +2464,13 @@ def _say_batch(batch):
     # the one line. An alert naming no relay text is spoken and not sent.
     relay = [p for _r, _b, _o, _a, p in batch if p]
     if opts.webhook and relay:
-        threading.Thread(target=post_webhook,
-                         args=(opts.webhook,
-                               "**EVE watch** - " + "\n".join(relay)),
-                         daemon=True).start()
+        text = (chr(10) + chr(10)).join(relay)
+        send, why = relay_ok(text)
+        if send:
+            threading.Thread(target=post_webhook, args=(opts.webhook, text),
+                             daemon=True).start()
+        else:
+            log(f"   not relayed - {why}")
 
     if not getattr(opts, "beeps", True) and not opts.popup and not opts.voice:
         return                      # --quiet: log and snapshot, make no noise
@@ -5591,6 +5652,9 @@ def cmd_watch(args):
 
         st["pilots_unsure"] = unsure
         st["arrived_names"] = []
+        # Joined for speech, and apart for a relay that lays them out as
+        # "Name:" and "Ship:" on their own lines.
+        st["arrived_who"] = []
         for key in here - st["pilots_seen"]:
             # A pilot seen for the first time had no record when the hull was
             # read, so this contributed NOTHING and the alert fell back to the
@@ -5602,6 +5666,7 @@ def cmd_watch(args):
             hull = seen_hull.get(key) or (entry or {}).get("now_ship") or ""
             shown = (entry or {}).get("name") or key
             st["arrived_names"].append(f"{shown} {hull}".strip())
+            st["arrived_who"].append((shown, hull))
             note_move(key, "in")
         for key in st["pilots_seen"] - here:
             note_move(key, "out", track=st["last_dist"].get(key),
@@ -5926,12 +5991,14 @@ def cmd_watch(args):
                             # Speech shortens several arrivals to "3 new" to
                             # stay listenable; a relayed line has no reason to
                             # drop the names and hulls.
-                            who = f"{TAG}: " if TAG else ""
+                            note = where_for(win["title"])
+                            pairs = st.pop("arrived_who", None)
                             if name.startswith("overview"):
-                                relay = who + " | ".join(shown)
+                                relay = relay_text(
+                                    "overview",
+                                    pairs or [(s, "") for s in shown], note)
                             elif name.startswith("sigs"):
-                                relay = (f"{who}new signature: "
-                                         + " | ".join(shown))
+                                relay = relay_text("sigs", shown, note)
                             else:
                                 relay = None
                             fire(name, st, box, frame, "arrive", detail, phrase,
@@ -6090,8 +6157,10 @@ def cmd_watch(args):
                                 f"{'s' if len(fresh) > 1 else ''}",
                                 f"New signature(s):\n\n{detail}", args,
                                 attribute=False,
-                                post=(f"{TAG}: " if TAG else "")
-                                     + f"new signature: {detail}")
+                                post=relay_text(
+                                    "sigs",
+                                    [fresh[k] for k in sorted(fresh)],
+                                    where_for(win["title"])))
                         if gone:
                             record_event(started, "clipboard", "sig_gone",
                                          ", ".join(sorted(gone)), obs_dir=obs_dir)
