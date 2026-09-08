@@ -6142,6 +6142,21 @@ def cmd_watch(args):
                             note = where_for(win["title"])
                             pairs = st.pop("arrived_who", None)
                             keys = st.pop("arrived_keys", None) or []
+                            # Where a list has columns, the pilot pass is the
+                            # one that knows who is a pilot. The two track
+                            # membership separately and drift: the pixels can
+                            # call a row new that the pilot pass has already
+                            # counted - a re-sort, or a label that changed -
+                            # and falling back to the raw row labels then
+                            # announced rows the pilot pass had REJECTED. That
+                            # is how an Astrahus was relayed as a contact, and
+                            # why the names arrived unsplit. Still logged and
+                            # snapshotted, because the churn is worth seeing.
+                            fresh_pilots = not st["columns"] or bool(pairs)
+                            if not fresh_pilots:
+                                log(f"   {name}: {len(arrived)} row(s) look "
+                                    f"new to the pixels but the pilot pass "
+                                    f"knows them - not announced")
                             if name.startswith("overview"):
                                 # One pilot, and another watcher lost them
                                 # moments ago: that is one movement, not two
@@ -6162,7 +6177,8 @@ def cmd_watch(args):
                             else:
                                 relay = None
                             fire(name, st, box, frame, "arrive", detail, phrase,
-                                 alarm=st["alert"], post=relay)
+                                 alarm=st["alert"] and fresh_pilots,
+                                 post=relay if fresh_pilots else None)
                         continue
 
                     seen, malformed = {}, []
