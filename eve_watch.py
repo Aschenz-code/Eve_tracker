@@ -6152,7 +6152,13 @@ def cmd_watch(args):
                             # is how an Astrahus was relayed as a contact, and
                             # why the names arrived unsplit. Still logged and
                             # snapshotted, because the churn is worth seeing.
-                            fresh_pilots = not st["columns"] or bool(pairs)
+                            # Only an OVERVIEW has a pilot pass. A
+                            # signature list has columns too, and testing for
+                            # those instead of for the pass silenced every
+                            # signature spawn - detected, stored, and never
+                            # announced.
+                            has_pass = name.startswith("overview") and st["columns"]
+                            fresh_pilots = (not has_pass) or bool(pairs)
                             if not fresh_pilots:
                                 log(f"   {name}: {len(arrived)} row(s) look "
                                     f"new to the pixels but the pilot pass "
