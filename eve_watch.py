@@ -2311,6 +2311,7 @@ def popup(title, msg):
 RELAY_REPEAT = 150.0        # an identical relay is dropped inside this
 RELAY_BURST  = 15           # most relays in RELAY_WINDOW
 RELAY_WINDOW = 60.0
+RELAY_SETTLE = 8.0          # wait, so a dock can correct a bare departure
 _relay_when = {}            # message -> when it last went out
 _relay_sent = []            # when each recent relay went out
 _relay_lock = threading.Lock()
@@ -2343,8 +2344,32 @@ def relay_ok(text):
     return True, ""
 
 
-def relay_text(kind, items, note):
-    """The message body for a relay. `kind` is "sigs" or "overview"."""
+def relay_now(text, opts, label):
+    """Relay something not worth speaking aloud.
+
+    A departure or a dock is worth reading and not worth being told out loud
+    every time, so it goes straight to the channel instead of joining the
+    announcer's queue. Same throttle, so it cannot flood either.
+    """
+    url = getattr(opts, "webhook", None)
+    if not url or not text:
+        return False
+    send, why = relay_ok(text)
+    if not send:
+        log(f"   {label} not relayed - {why}")
+        return False
+    threading.Thread(target=post_webhook, args=(url, text), daemon=True).start()
+    log(f"   relayed [discord]: {label}")
+    return True
+
+
+def relay_text(kind, items, note, head=None):
+    """The message body for a relay. `kind` is "sigs" or "overview".
+
+    `head` replaces the heading, which is how a departure reuses the contact
+    layout: the reader wants the same Name and Ship lines whether someone
+    turned up or left.
+    """
     nl = chr(10)
     if kind == "sigs":
         head = ("**New sig spawned**" if len(items) == 1
@@ -2353,7 +2378,8 @@ def relay_text(kind, items, note):
         if note:
             lines.append(note)
         return nl.join(lines)
-    head = "**New contact**" if len(items) == 1 else "**New contacts**"
+    head = (f"**{head}**" if head else
+            ("**New contact**" if len(items) == 1 else "**New contacts**"))
     blocks = []
     for who, hull in items:
         one = [f"Name: {who}"]
@@ -5295,6 +5321,11 @@ def cmd_watch(args):
     # overview event - measured across 16 changes, all within 5s - so both
     # sides have to be able to complete the pair.
     moves, pending_counts = [], []
+    # A departure is held for a moment before it is relayed, because the dock
+    # that explains it arrives AFTER it: the overview loses the row, and the
+    # structure counter only ticks a few seconds later. Relaying at once would
+    # say "left" and then "docked" for one action, the first of them wrong.
+    gone_pending = {}
     DOCK_WINDOW = 20.0
 
     def note_move(key, direction, track=None, hole_at=None):
@@ -5334,6 +5365,8 @@ def cmd_watch(args):
                 who["jumps"] = who.get("jumps", 0) + 1
                 who["last_note"] = f"took the hole {dt.datetime.now():%H:%M:%S}"
                 book_dirty = True
+            gone_pending[key] = {"at": time.time(), "name": name,
+                                 "hull": flying, "why": "Took the wormhole"}
             log(f"** {name}{in_what} TOOK THE WORMHOLE - vanished "
                 f"{abs(was_at - hole_at)/1000:.1f}km from it, last seen at "
                 f"{was_at/1000:.0f}km")
@@ -5352,6 +5385,9 @@ def cmd_watch(args):
             if who is not None:
                 who["last_note"] = f"left {dt.datetime.now():%H:%M:%S}{at}"
                 book_dirty = True
+            gone_pending[key] = {"at": time.time(), "name": name,
+                                 "hull": flying,
+                                 "why": "Warped off" if leaving else "Left"}
             log(f"   {name} left{at}{why}{in_what}"
                 + (f" (hole is at {hole_at/1000:.0f}km)" if hole_at else ""))
         moves.append((time.time(), key, direction))
@@ -5402,6 +5438,9 @@ def cmd_watch(args):
                     who.pop("now_at", None)
                     who.pop("now_by", None)
                 book_dirty = True
+            if up and key in gone_pending:
+                gone_pending[key]["why"] = "Docked"
+                gone_pending[key]["hull"] = flying or gone_pending[key]["hull"]
             in_what = f" in {flying}" if flying else ""
             log(f"** {name}{in_what} {verb} (structure count "
                 f"{'up' if up else 'down'} within {abs(hit[0] - at):.0f}s of "
@@ -6220,6 +6259,13 @@ def cmd_watch(args):
                 touched.clear()
                 save_pilots(book)
                 book_dirty, book_saved = False, time.time()
+
+            for key in [k for k, v in gone_pending.items()
+                        if time.time() - v["at"] >= RELAY_SETTLE]:
+                g = gone_pending.pop(key)
+                relay_now(relay_text("overview", [(g["name"], g["hull"])],
+                                     where_for(win["title"]), head=g["why"]),
+                          args, f"{g['why']} - {g['name']}")
 
             if time.time() >= next_beat:
                 next_beat = time.time() + 60
