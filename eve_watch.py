@@ -2406,6 +2406,21 @@ def sig_age(record):
         return None
 
 
+def sig_is_new(sid, mine, told, now):
+    """Whether a signature is a fresh spawn worth announcing, and why not.
+
+    ONE test for both ways a signature is noticed - read off the panel, or
+    pasted from the clipboard. Keeping a ledger each is exactly what announced
+    the same spawn twice, once from each.
+    """
+    age = sig_age(mine.get(sid))
+    if age is not None and age > SIG_FRESH:
+        return False, f"known {age / 60:.0f} min"
+    if sid in told and now - told[sid] <= SIG_FRESH:
+        return False, f"announced {now - told[sid]:.0f}s ago"
+    return True, ""
+
+
 def relay_ok(text):
     """Whether to relay this now. Returns (send, why not).
 
@@ -5400,6 +5415,10 @@ def cmd_watch(args):
     clip_seq = user32.GetClipboardSequenceNumber() if s["clipboard_sigs"] else 0
     known_sigs = {}
     clip_primed = False
+    # What has been announced, whichever way it was noticed. The panel and a
+    # paste each used to keep their own idea of what was new, so a signature
+    # the panel had just announced was announced again by the next paste.
+    sigs_told = {}
 
     def fire(name, st, box, frame, event, detail, phrase=None, alarm=True,
              post=None):
@@ -6124,9 +6143,8 @@ def cmd_watch(args):
                                         f"- adopting {len(arrived)} row(s) "
                                         f"without alerting")
                                 arrived = []
-                                seeded = st.setdefault("sigs_told", {})
                                 for sid in sigs_book.get(TAG or "(unknown)", {}):
-                                    seeded[sid] = now
+                                    sigs_told[sid] = now
                             # Whether a signature is NEW cannot be "is it
                             # in the file": the file is refreshed on its own
                             # twenty-second timer, so a spawn is usually
@@ -6136,7 +6154,7 @@ def cmd_watch(args):
                             # instead, and remember what has been announced so
                             # a flapping row cannot say it twice.
                             mine = sigs_book.get(TAG or "(unknown)", {})
-                            told = st.setdefault("sigs_told", {})
+                            told = sigs_told
                             keep = []
                             for label in arrived:
                                 sid = repair_sig_id(label, mine)
@@ -6144,14 +6162,9 @@ def cmd_watch(args):
                                     log(f"   {name}: unreadable row changed "
                                         f"- no alert")
                                     continue
-                                age = sig_age(mine.get(sid))
-                                said = now - told.get(sid, 0)
-                                if age is not None and age > SIG_FRESH:
-                                    log(f"   {name}: {sid} has been known "
-                                        f"{age / 60:.0f} min - no alert")
-                                elif said <= SIG_FRESH:
-                                    log(f"   {name}: {sid} already announced "
-                                        f"{said:.0f}s ago - no alert")
+                                new, why = sig_is_new(sid, mine, told, now)
+                                if not new:
+                                    log(f"   {name}: {sid} - no alert ({why})")
                                 else:
                                     told[sid] = now
                                     keep.append(label)
@@ -6384,6 +6397,21 @@ def cmd_watch(args):
                         fresh = {k: v for k, v in sigs.items() if k not in known_sigs}
                         gone = [k for k in known_sigs if k not in sigs]
                         known_sigs = sigs
+                        # The panel may well have announced it already: it
+                        # notices a spawn on its own, and a paste follows
+                        # whenever you happen to make one.
+                        mine_now = sigs_book.get(TAG or "(unknown)", {})
+                        again, at = [], time.time()
+                        for k in sorted(fresh):
+                            new, why = sig_is_new(k, mine_now, sigs_told, at)
+                            if new:
+                                sigs_told[k] = at
+                            else:
+                                again.append(f"{k} ({why})")
+                                del fresh[k]
+                        if again:
+                            log(f"   clipboard: not repeated - "
+                                + ", ".join(again))
                         log(f"   clipboard: {len(sigs)} signature(s) pasted"
                             + (f", {len(fresh)} new" if fresh else ""))
                         record_event(started, "clipboard", "sigs",
