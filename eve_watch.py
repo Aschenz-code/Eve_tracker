@@ -6164,10 +6164,27 @@ def cmd_watch(args):
                                 came = (handoff_other(keys[0], win["title"],
                                                       "depart")
                                         if len(keys) == 1 else None)
+                                # The last thing this same client knew about
+                                # them was that they went into the structure,
+                                # so appearing here means they have come out
+                                # of it. No structure counter needed - the
+                                # record already says it - and it holds where
+                                # the counter is not even watched. Only if it
+                                # was THIS client that saw them dock: docked
+                                # here and appearing somewhere else is a
+                                # different story, and not this one.
+                                out_of = None
+                                if len(keys) == 1 and not came:
+                                    was = book.get(keys[0]) or {}
+                                    note_was = (was.get("last_note") or "")
+                                    if (was.get("last_by") == TAG
+                                            and note_was.startswith(("docked",
+                                                                     "undocked"))):
+                                        out_of = "Undocked"
                                 relay = relay_text(
                                     "overview",
                                     pairs or [(s, "") for s in shown], note,
-                                    head="Moved" if came else None,
+                                    head=("Moved" if came else out_of),
                                     extra=([f"From: {came['note']}"]
                                            if came and came.get("note") else None))
                                 for k in keys:
