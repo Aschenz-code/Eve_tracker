@@ -2448,29 +2448,31 @@ def _say_batch(batch):
     # An alert that did not reach you is otherwise undiagnosable: the log
     # recorded the sighting and nothing at all about whether anything was
     # said, so "I saw them and got no notification" could not be answered.
+    # Decide the relay before saying anything, so the one line that records
+    # this alert can also record whether it left the machine. Without that,
+    # "is it relaying?" could only be answered by what did NOT happen.
+    relay = [p for _r, _b, _o, _a, p in batch if p]
+    text = (chr(10) + chr(10)).join(relay)
+    send, why = (relay_ok(text) if (opts.webhook and text) else (False, ""))
     ways = ",".join(w for w, on in (("beep", getattr(opts, "beeps", True)),
                                     ("voice", opts.voice),
-                                    ("popup", opts.popup)) if on) or "silent"
-    log(f"   announcing [{ways}]: {phrase}")
+                                    ("popup", opts.popup),
+                                    ("discord", send)) if on) or "silent"
+    held = f"   [not relayed - {why}]" if (opts.webhook and text and not send) else ""
+    log(f"   announcing [{ways}]: {phrase}{held}")
     if opts.popup:
         body = ("\n\n").join(b for _r, b, _o, _a in batch)
         if TAG:
             body = f"Client: {TAG}\n\n{body}"
         threading.Thread(target=popup, args=(title, body), daemon=True).start()
 
-    # Relay only what asked to be relayed. Everything used to go, so a
-    # channel got the structure counter ticking and "watcher lost the overview
-    # region" alongside the contacts - and a batch holding both carried both in
-    # the one line. An alert naming no relay text is spoken and not sent.
-    relay = [p for _r, _b, _o, _a, p in batch if p]
-    if opts.webhook and relay:
-        text = (chr(10) + chr(10)).join(relay)
-        send, why = relay_ok(text)
-        if send:
-            threading.Thread(target=post_webhook, args=(opts.webhook, text),
-                             daemon=True).start()
-        else:
-            log(f"   not relayed - {why}")
+    # Only what asked to be relayed goes. Everything used to, so a channel got
+    # the structure counter ticking and "watcher lost the overview region"
+    # alongside the contacts, and a batch holding both carried both in one
+    # line. An alert naming no relay text is spoken and not sent.
+    if send:
+        threading.Thread(target=post_webhook, args=(opts.webhook, text),
+                         daemon=True).start()
 
     if not getattr(opts, "beeps", True) and not opts.popup and not opts.voice:
         return                      # --quiet: log and snapshot, make no noise
