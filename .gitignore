@@ -37,3 +37,7 @@ signatures.json
 signatures.json.*
 where.json
 where.json.tmp
+handoff.json
+handoff.json.tmp
+relay_sent
+relay_sent.tmp

@@ -73,6 +73,7 @@ CLIPFILE  = os.path.join(HERE, "CLIPBOARD_OWNER")  # which watcher reads Ctrl+C
 PILOTS    = os.path.join(HERE, "pilots.json")      # who has been seen, in what
 MARKS     = os.path.join(HERE, "pilot_marks.log")  # corrections from the viewer
 WHEREFILE = os.path.join(HERE, "where.json")       # per-client note for a relay
+HANDOFF   = os.path.join(HERE, "handoff.json")     # who saw whom, across watchers
 SIGFILE   = os.path.join(HERE, "signatures.json")  # which sigs are scanned
 
 
@@ -848,6 +849,54 @@ def mark_pilot(key, what):
         return True
     except OSError:
         return False
+
+
+HANDOFF_WINDOW = 30.0       # a crossing counts as one movement inside this
+
+
+def _handoff_read():
+    try:
+        with open(HANDOFF, "r", encoding="utf-8") as fh:
+            book = json.load(fh)
+        return book if isinstance(book, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def note_handoff(key, client, note, kind):
+    """Record that this client saw a pilot arrive, leave or dock.
+
+    Shared between watchers, because a ship crossing from one to another is
+    ONE movement and only they together can see it. Written under a gate: the
+    read-modify-write races otherwise, and a lost entry means a missed link.
+    """
+    release = named_gate("eve_watch_handoff_gate", 3.0)
+    try:
+        now = time.time()
+        book = {k: v for k, v in _handoff_read().items()
+                if isinstance(v, dict) and now - v.get("at", 0) <= 120}
+        book[key] = {"at": now, "client": client, "note": note, "kind": kind}
+        tmp = HANDOFF + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(book, fh, indent=1, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, HANDOFF)
+    except OSError:
+        pass
+    finally:
+        if release:
+            release()
+
+
+def handoff_other(key, client, kind):
+    """Another client that saw this pilot do `kind` just now, or None."""
+    seen = _handoff_read().get(key)
+    if not isinstance(seen, dict):
+        return None
+    if seen.get("kind") != kind or seen.get("client") == client:
+        return None
+    if time.time() - seen.get("at", 0) > HANDOFF_WINDOW:
+        return None
+    return seen
 
 
 def load_where():
@@ -2312,9 +2361,36 @@ RELAY_REPEAT = 150.0        # an identical relay is dropped inside this
 RELAY_BURST  = 15           # most relays in RELAY_WINDOW
 RELAY_WINDOW = 60.0
 RELAY_SETTLE = 8.0          # wait, so a dock can correct a bare departure
-_relay_when = {}            # message -> when it last went out
-_relay_sent = []            # when each recent relay went out
+_relay_when = {}            # message -> when it last went out (this watcher)
 _relay_lock = threading.Lock()
+RELAYSENT = os.path.join(HERE, "relay_sent")   # shared count, all watchers
+
+
+def _relay_recent(now):
+    """When each relay went out lately, across every watcher."""
+    try:
+        with open(RELAYSENT, "r", encoding="utf-8") as fh:
+            out = []
+            for line in fh:
+                try:
+                    t = float(line.strip())
+                except ValueError:
+                    continue
+                if now - t < RELAY_WINDOW:
+                    out.append(t)
+            return out
+    except OSError:
+        return []
+
+
+def _relay_note(times):
+    tmp = RELAYSENT + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(chr(10).join(f"{t:.3f}" for t in times[-200:]))
+        os.replace(tmp, RELAYSENT)
+    except OSError:
+        pass
 
 
 def relay_ok(text):
@@ -2335,12 +2411,21 @@ def relay_ok(text):
         seen = _relay_when.get(text)
         if seen is not None:
             return False, f"same message {now - seen:.0f}s ago"
-        _relay_sent[:] = [t for t in _relay_sent if now - t < RELAY_WINDOW]
-        if len(_relay_sent) >= RELAY_BURST:
-            return False, (f"{len(_relay_sent)} already sent in the last "
-                           f"{RELAY_WINDOW:.0f}s")
+    # The ceiling is what DISCORD accepts, so it has to be counted across all
+    # the watchers. Each keeping its own tally made the real ceiling three
+    # times the one written here.
+    release = named_gate("eve_watch_relay_gate", 3.0)
+    try:
+        recent = _relay_recent(now)
+        if len(recent) >= RELAY_BURST:
+            return False, (f"{len(recent)} already sent in the last "
+                           f"{RELAY_WINDOW:.0f}s, across all clients")
+        _relay_note(recent + [now])
+    finally:
+        if release:
+            release()
+    with _relay_lock:
         _relay_when[text] = now
-        _relay_sent.append(now)
     return True, ""
 
 
@@ -2363,18 +2448,25 @@ def relay_now(text, opts, label):
     return True
 
 
-def relay_text(kind, items, note, head=None):
+def relay_text(kind, items, note, head=None, when=None, extra=None):
     """The message body for a relay. `kind` is "sigs" or "overview".
 
     `head` replaces the heading, which is how a departure reuses the contact
     layout: the reader wants the same Name and Ship lines whether someone
-    turned up or left.
+    turned up or left. `extra` adds lines before the note.
+
+    The heading carries the time the thing HAPPENED. Discord stamps a message
+    when it posts, which is not the same: a departure is held a few seconds so
+    a dock can correct it, and messages from two watchers can land in the
+    wrong order when a ship crosses from one to the other. With the real time
+    in the body, the order it reads in stops mattering.
     """
+    stamp = dt.datetime.fromtimestamp(when or time.time()).strftime("%H:%M:%S")
     nl = chr(10)
     if kind == "sigs":
         head = ("**New sig spawned**" if len(items) == 1
                 else "**New sigs spawned**")
-        lines = [head] + [str(i) for i in items]
+        lines = [f"{head} · {stamp}"] + [str(i) for i in items]
         if note:
             lines.append(note)
         return nl.join(lines)
@@ -2386,7 +2478,8 @@ def relay_text(kind, items, note, head=None):
         if hull:
             one.append(f"Ship: {hull}")
         blocks.append(nl.join(one))
-    out = [head, (nl + nl).join(blocks)]
+    out = [f"{head} · {stamp}", (nl + nl).join(blocks)]
+    out += list(extra or [])
     if note:
         out.append(f"Where: {note}")
     return nl.join(out)
@@ -2414,17 +2507,16 @@ ALERT_HOLD = 0.8            # seconds spent gathering before anything is said
 PILOT_RUSH = 4              # quick column re-reads allowed after an arrival
 
 
-def speech_gate(seconds=8.0):
-    """A machine-wide turn to speak, so two watchers do not talk over each other.
+def named_gate(name, seconds):
+    """A machine-wide turn at something, shared by every watcher.
 
     A named mutex, because the OS releases it if a watcher dies - a lock file
-    would need stale detection and would silence everything if one leaked.
-    Returns a release callable, or None if the wait ran out, in which case
-    speak anyway: a late alert overlapping beats a dropped one.
+    would need stale detection and would block everything if one leaked.
+    Returns a release callable, or None if the wait ran out.
     """
     try:
         k = ctypes.windll.kernel32
-        h = k.CreateMutexW(None, False, "eve_watch_speech_gate")
+        h = k.CreateMutexW(None, False, name)
         if not h:
             return lambda: None
         if k.WaitForSingleObject(h, int(seconds * 1000)) not in (0, 128):
@@ -2439,6 +2531,15 @@ def speech_gate(seconds=8.0):
         return release
     except Exception:
         return lambda: None
+
+
+def speech_gate(seconds=8.0):
+    """A turn to speak, so two watchers do not talk over each other.
+
+    None means the wait ran out; speak anyway then, because a late alert
+    overlapping is better than a dropped one.
+    """
+    return named_gate("eve_watch_speech_gate", seconds)
 
 
 def _say_batch(batch):
@@ -5367,6 +5468,7 @@ def cmd_watch(args):
                 book_dirty = True
             gone_pending[key] = {"at": time.time(), "name": name,
                                  "hull": flying, "why": "Took the wormhole"}
+            note_handoff(key, win["title"], where_for(win["title"]), "depart")
             log(f"** {name}{in_what} TOOK THE WORMHOLE - vanished "
                 f"{abs(was_at - hole_at)/1000:.1f}km from it, last seen at "
                 f"{was_at/1000:.0f}km")
@@ -5388,6 +5490,7 @@ def cmd_watch(args):
             gone_pending[key] = {"at": time.time(), "name": name,
                                  "hull": flying,
                                  "why": "Warped off" if leaving else "Left"}
+            note_handoff(key, win["title"], where_for(win["title"]), "depart")
             log(f"   {name} left{at}{why}{in_what}"
                 + (f" (hole is at {hole_at/1000:.0f}km)" if hole_at else ""))
         moves.append((time.time(), key, direction))
@@ -5441,6 +5544,8 @@ def cmd_watch(args):
             if up and key in gone_pending:
                 gone_pending[key]["why"] = "Docked"
                 gone_pending[key]["hull"] = flying or gone_pending[key]["hull"]
+                note_handoff(key, win["title"], where_for(win["title"]),
+                             "docked")
             in_what = f" in {flying}" if flying else ""
             log(f"** {name}{in_what} {verb} (structure count "
                 f"{'up' if up else 'down'} within {abs(hit[0] - at):.0f}s of "
@@ -5696,6 +5801,7 @@ def cmd_watch(args):
         # Joined for speech, and apart for a relay that lays them out as
         # "Name:" and "Ship:" on their own lines.
         st["arrived_who"] = []
+        st["arrived_keys"] = []
         for key in here - st["pilots_seen"]:
             # A pilot seen for the first time had no record when the hull was
             # read, so this contributed NOTHING and the alert fell back to the
@@ -5708,6 +5814,7 @@ def cmd_watch(args):
             shown = (entry or {}).get("name") or key
             st["arrived_names"].append(f"{shown} {hull}".strip())
             st["arrived_who"].append((shown, hull))
+            st["arrived_keys"].append(key)
             note_move(key, "in")
         for key in st["pilots_seen"] - here:
             note_move(key, "out", track=st["last_dist"].get(key),
@@ -6034,10 +6141,22 @@ def cmd_watch(args):
                             # drop the names and hulls.
                             note = where_for(win["title"])
                             pairs = st.pop("arrived_who", None)
+                            keys = st.pop("arrived_keys", None) or []
                             if name.startswith("overview"):
+                                # One pilot, and another watcher lost them
+                                # moments ago: that is one movement, not two
+                                # unrelated events, so say where from.
+                                came = (handoff_other(keys[0], win["title"],
+                                                      "depart")
+                                        if len(keys) == 1 else None)
                                 relay = relay_text(
                                     "overview",
-                                    pairs or [(s, "") for s in shown], note)
+                                    pairs or [(s, "") for s in shown], note,
+                                    head="Moved" if came else None,
+                                    extra=([f"From: {came['note']}"]
+                                           if came and came.get("note") else None))
+                                for k in keys:
+                                    note_handoff(k, win["title"], note, "arrive")
                             elif name.startswith("sigs"):
                                 relay = relay_text("sigs", shown, note)
                             else:
@@ -6263,8 +6382,17 @@ def cmd_watch(args):
             for key in [k for k, v in gone_pending.items()
                         if time.time() - v["at"] >= RELAY_SETTLE]:
                 g = gone_pending.pop(key)
+                # If another watcher has already announced this pilot arriving,
+                # the channel has the story: saying they left as well would be
+                # the same movement told twice, backwards.
+                landed = handoff_other(key, win["title"], "arrive")
+                if landed:
+                    log(f"   {g['name']} not relayed - already announced "
+                        f"arriving at {landed.get('note') or landed['client']}")
+                    continue
                 relay_now(relay_text("overview", [(g["name"], g["hull"])],
-                                     where_for(win["title"]), head=g["why"]),
+                                     where_for(win["title"]), head=g["why"],
+                                     when=g["at"]),
                           args, f"{g['why']} - {g['name']}")
 
             if time.time() >= next_beat:
