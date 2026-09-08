@@ -3884,51 +3884,6 @@ def cmd_hub(args):
         b.pack(side="left", padx=3)
         mode_btns[name] = b
 
-    # One line per selected client: what to call the place it is watching.
-    # Corp mates do not know one character from another, but they do need to
-    # know where a contact turned up.
-    where_box = tk.LabelFrame(root, text="where each client is watching",
-                              font=("Segoe UI", 9), padx=8, pady=6)
-    where_box.pack(anchor="w", fill="x", pady=(12, 0))
-    where_note = tk.Label(root, text="", font=("Segoe UI", 8), fg="#666")
-    where_note.pack(anchor="w")
-    where_vars = {}
-
-    def where_save(title, var):
-        book = load_where()
-        text = var.get().strip()
-        if text:
-            book[title] = text
-        else:
-            book.pop(title, None)
-        save_where(book)
-        where_note.config(text=f"saved: {short_client(title)} -> "
-                               f"{text or '(cleared)'}", fg="#0a7")
-        root.after(3000, lambda: where_note.config(text=""))
-
-    def where_build(sel):
-        for title, var in where_vars.items():      # do not lose a pending edit
-            where_save(title, var)
-        for child in where_box.winfo_children():
-            child.destroy()
-        where_vars.clear()
-        if not sel:
-            tk.Label(where_box, text="no clients selected",
-                     font=("Segoe UI", 9), fg="#666").pack(anchor="w")
-            return
-        book = load_where()
-        for title in sel:
-            row = tk.Frame(where_box)
-            row.pack(anchor="w", fill="x", pady=1)
-            tk.Label(row, text=short_client(title), width=14, anchor="w",
-                     font=("Segoe UI", 9)).pack(side="left")
-            var = tk.StringVar(value=book.get(title, ""))
-            entry = tk.Entry(row, textvariable=var, width=44)
-            entry.pack(side="left")
-            entry.bind("<Return>", lambda _e, t=title, v=var: where_save(t, v))
-            entry.bind("<FocusOut>", lambda _e, t=title, v=var: where_save(t, v))
-            where_vars[title] = var
-
     def refresh():
         sup = _supervisor_pids()
         wat = _watcher_pids()
@@ -3958,10 +3913,6 @@ def cmd_hub(args):
         for name, b in mode_btns.items():
             b.config(relief="sunken" if name == mode else "raised",
                      font=("Segoe UI", 9, "bold" if name == mode else "normal"))
-        # Only when the client list changes: rebuilding every few seconds would
-        # throw away whatever was half typed.
-        if list(where_vars) != list(sel):
-            where_build(sel)
         root.after(3000, refresh)
 
     refresh()
@@ -4457,6 +4408,20 @@ def cmd_pick(args):
         parent.wait_window(win)
         return holder.get("value", (False, "no result"))
 
+    def where_write(title, var):
+        """Save this client's note at once - no restart, so no blind seconds."""
+        book = load_where()
+        text = var.get().strip()
+        if text:
+            book[title] = text
+        else:
+            book.pop(title, None)
+        save_where(book)
+        if state.get("status") is not None:
+            state["status"].config(
+                text=f"where: {short_client(title)} -> {text or '(cleared)'}",
+                fg="#060")
+
     root = tk.Tk()
     root.title("eve-watch - clients")
     root.attributes("-topmost", True)
@@ -4590,6 +4555,7 @@ def cmd_pick(args):
                  ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 8))
 
         client_vars, region_vars = {}, {}
+        where_vars, where_book = {}, load_where()
         row = 2
         for title in titles:
             regions = sorted(by_client.get(title, []), key=lambda r: r["name"])
@@ -4640,6 +4606,26 @@ def cmd_pick(args):
             paint_alerts()
             pbtn.grid(row=row, column=5, sticky="w", padx=(4, 0))
             row += 1
+
+            # What a relayed alert should say about WHERE it came from. A corp
+            # mate cannot tell one of these characters from another; the place
+            # is the part they can act on.
+            wrow = tk.Frame(body)
+            wrow.grid(row=row, column=0, columnspan=6, sticky="w",
+                      padx=(28, 0), pady=(0, 2))
+            tk.Label(wrow, text="Where:", font=("Segoe UI", 9)).pack(side="left")
+            wv = tk.StringVar(value=where_book.get(title, ""))
+            went = tk.Entry(wrow, textvariable=wv, width=40,
+                            font=("Segoe UI", 9))
+            went.pack(side="left", padx=(4, 0))
+            tk.Label(wrow, text="goes out with this client's alerts",
+                     font=("Segoe UI", 8), fg="#888"
+                     ).pack(side="left", padx=(8, 0))
+            went.bind("<Return>", lambda _e, t=title, v=wv: where_write(t, v))
+            went.bind("<FocusOut>", lambda _e, t=title, v=wv: where_write(t, v))
+            where_vars[title] = wv
+            row += 1
+
             for r in regions:
                 rv = tk.IntVar(value=1 if r.get("enabled", True) else 0)
                 region_vars[(title, r["name"])] = rv
@@ -4652,6 +4638,7 @@ def cmd_pick(args):
             row += 1
 
         state["client_vars"], state["region_vars"] = client_vars, region_vars
+        state["where_vars"] = where_vars
         state["status"] = tk.Label(body, text="", font=("Segoe UI", 9), fg="#060")
         state["status"].grid(row=row, column=0, columnspan=4, sticky="w",
                              pady=(6, 4))
@@ -4663,6 +4650,15 @@ def cmd_pick(args):
 
     def save():
         cfg = load_config()
+        # A note typed but never left or entered is still meant, so take it too.
+        book = load_where()
+        for t, v in state.get("where_vars", {}).items():
+            text = v.get().strip()
+            if text:
+                book[t] = text
+            else:
+                book.pop(t, None)
+        save_where(book)
         chosen = [t for t, v in state["client_vars"].items() if v.get()]
         write_clients(chosen)
         off = 0
