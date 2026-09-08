@@ -2361,6 +2361,7 @@ RELAY_REPEAT = 150.0        # an identical relay is dropped inside this
 RELAY_BURST  = 15           # most relays in RELAY_WINDOW
 RELAY_WINDOW = 60.0
 RELAY_SETTLE = 8.0          # wait, so a dock can correct a bare departure
+SIG_FRESH    = 120.0        # a signature counts as newly spawned this long
 _relay_when = {}            # message -> when it last went out (this watcher)
 _relay_lock = threading.Lock()
 RELAYSENT = os.path.join(HERE, "relay_sent")   # shared count, all watchers
@@ -2391,6 +2392,18 @@ def _relay_note(times):
         os.replace(tmp, RELAYSENT)
     except OSError:
         pass
+
+
+def sig_age(record):
+    """Seconds since a signature was first stored, or None if never was."""
+    if not isinstance(record, dict):
+        return None
+    try:
+        return (dt.datetime.now()
+                - dt.datetime.fromisoformat(record.get("first_seen") or "")
+                ).total_seconds()
+    except (TypeError, ValueError):
+        return None
 
 
 def relay_ok(text):
@@ -6087,7 +6100,6 @@ def cmd_watch(args):
                             # the file has never held. Note the known set BEFORE
                             # recording, or every id looks familiar by the time
                             # the alert is decided.
-                            known_ids = set(sigs_book.get(TAG or "(unknown)", {}))
                             if arrived or departed or now - st.get("sigs_at", 0) >= 20:
                                 st["sigs_at"] = now
                                 record_sigs(st, frame, box, s)
@@ -6095,18 +6107,34 @@ def cmd_watch(args):
                                 log(f"   {name}: different system - adopting "
                                     f"its signatures without alerting")
                                 arrived = []
+                            # Whether a signature is NEW cannot be "is it
+                            # in the file": the file is refreshed on its own
+                            # twenty-second timer, so a spawn is usually
+                            # stored a second or two BEFORE the pixels
+                            # confirm the row, and asking then said it was
+                            # already known. Ask how long it has been known
+                            # instead, and remember what has been announced so
+                            # a flapping row cannot say it twice.
+                            mine = sigs_book.get(TAG or "(unknown)", {})
+                            told = st.setdefault("sigs_told", {})
                             keep = []
                             for label in arrived:
-                                sid = repair_sig_id(
-                                    label, sigs_book.get(TAG or "(unknown)", {}))
-                                if sid and sid not in known_ids:
-                                    keep.append(label)
-                                elif sid:
-                                    log(f"   {name}: {sid} changed, not new "
-                                        f"- no alert")
-                                else:
+                                sid = repair_sig_id(label, mine)
+                                if not sid:
                                     log(f"   {name}: unreadable row changed "
                                         f"- no alert")
+                                    continue
+                                age = sig_age(mine.get(sid))
+                                said = now - told.get(sid, 0)
+                                if age is not None and age > SIG_FRESH:
+                                    log(f"   {name}: {sid} has been known "
+                                        f"{age / 60:.0f} min - no alert")
+                                elif said <= SIG_FRESH:
+                                    log(f"   {name}: {sid} already announced "
+                                        f"{said:.0f}s ago - no alert")
+                                else:
+                                    told[sid] = now
+                                    keep.append(label)
                             arrived = keep
                         for was, now_is in st.pop("relabelled", []):
                             log(f"   {name}: row first read as {was!r} reads "
