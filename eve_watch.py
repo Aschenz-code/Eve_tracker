@@ -72,6 +72,7 @@ PAUSEFILE = os.path.join(HERE, "PAUSED")   # exists = the running watcher idles
 CLIPFILE  = os.path.join(HERE, "CLIPBOARD_OWNER")  # which watcher reads Ctrl+C
 PILOTS    = os.path.join(HERE, "pilots.json")      # who has been seen, in what
 MARKS     = os.path.join(HERE, "pilot_marks.log")  # corrections from the viewer
+WHEREFILE = os.path.join(HERE, "where.json")       # per-client note for a relay
 SIGFILE   = os.path.join(HERE, "signatures.json")  # which sigs are scanned
 
 
@@ -847,6 +848,37 @@ def mark_pilot(key, what):
         return True
     except OSError:
         return False
+
+
+def load_where():
+    """{client title: note}. What to say about WHERE an alert came from.
+
+    Kept out of config.json deliberately: a change there restarts the client's
+    watcher, and typing a note is no reason to go blind for a few seconds.
+    """
+    try:
+        with open(WHEREFILE, "r", encoding="utf-8") as fh:
+            book = json.load(fh)
+        return {k: v for k, v in book.items() if isinstance(v, str)}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_where(book):
+    tmp = WHEREFILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(book, fh, indent=1, ensure_ascii=False, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, WHEREFILE)
+    except OSError as exc:
+        log(f"  where.json write failed: {exc}")
+
+
+def where_for(title):
+    """This client's note, or "" - read fresh, so an edit takes effect at once."""
+    return (load_where().get(title) or "").strip()
 
 
 def read_marks(since=0.0):
@@ -3852,6 +3884,51 @@ def cmd_hub(args):
         b.pack(side="left", padx=3)
         mode_btns[name] = b
 
+    # One line per selected client: what to call the place it is watching.
+    # Corp mates do not know one character from another, but they do need to
+    # know where a contact turned up.
+    where_box = tk.LabelFrame(root, text="where each client is watching",
+                              font=("Segoe UI", 9), padx=8, pady=6)
+    where_box.pack(anchor="w", fill="x", pady=(12, 0))
+    where_note = tk.Label(root, text="", font=("Segoe UI", 8), fg="#666")
+    where_note.pack(anchor="w")
+    where_vars = {}
+
+    def where_save(title, var):
+        book = load_where()
+        text = var.get().strip()
+        if text:
+            book[title] = text
+        else:
+            book.pop(title, None)
+        save_where(book)
+        where_note.config(text=f"saved: {short_client(title)} -> "
+                               f"{text or '(cleared)'}", fg="#0a7")
+        root.after(3000, lambda: where_note.config(text=""))
+
+    def where_build(sel):
+        for title, var in where_vars.items():      # do not lose a pending edit
+            where_save(title, var)
+        for child in where_box.winfo_children():
+            child.destroy()
+        where_vars.clear()
+        if not sel:
+            tk.Label(where_box, text="no clients selected",
+                     font=("Segoe UI", 9), fg="#666").pack(anchor="w")
+            return
+        book = load_where()
+        for title in sel:
+            row = tk.Frame(where_box)
+            row.pack(anchor="w", fill="x", pady=1)
+            tk.Label(row, text=short_client(title), width=14, anchor="w",
+                     font=("Segoe UI", 9)).pack(side="left")
+            var = tk.StringVar(value=book.get(title, ""))
+            entry = tk.Entry(row, textvariable=var, width=44)
+            entry.pack(side="left")
+            entry.bind("<Return>", lambda _e, t=title, v=var: where_save(t, v))
+            entry.bind("<FocusOut>", lambda _e, t=title, v=var: where_save(t, v))
+            where_vars[title] = var
+
     def refresh():
         sup = _supervisor_pids()
         wat = _watcher_pids()
@@ -3881,6 +3958,10 @@ def cmd_hub(args):
         for name, b in mode_btns.items():
             b.config(relief="sunken" if name == mode else "raised",
                      font=("Segoe UI", 9, "bold" if name == mode else "normal"))
+        # Only when the client list changes: rebuilding every few seconds would
+        # throw away whatever was half typed.
+        if list(where_vars) != list(sel):
+            where_build(sel)
         root.after(3000, refresh)
 
     refresh()

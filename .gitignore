@@ -35,3 +35,5 @@ pilots.json.*
 pilot_marks.log
 signatures.json
 signatures.json.*
+where.json
+where.json.tmp
