@@ -6103,10 +6103,30 @@ def cmd_watch(args):
                             if arrived or departed or now - st.get("sigs_at", 0) >= 20:
                                 st["sigs_at"] = now
                                 record_sigs(st, frame, box, s)
-                            if st.pop("jumped", False):
-                                log(f"   {name}: different system - adopting "
-                                    f"its signatures without alerting")
+                            # The FIRST look at a list is never a spawn,
+                            # and neither is the first look after a jump. Both
+                            # matter now that "new" means "stored recently":
+                            # a fresh system's ids are all stored seconds ago,
+                            # so without this the churn of the next couple of
+                            # minutes would announce the whole list as spawns.
+                            # Marking them as already announced covers the
+                            # window, and past it their age rules them out.
+                            jumped = st.pop("jumped", False)
+                            seeding = jumped or not st.get("sigs_seeded")
+                            if seeding:
+                                st["sigs_seeded"] = True
+                                if jumped:
+                                    log(f"   {name}: different system - "
+                                        f"adopting its signatures without "
+                                        f"alerting")
+                                elif arrived:
+                                    log(f"   {name}: first look at this list "
+                                        f"- adopting {len(arrived)} row(s) "
+                                        f"without alerting")
                                 arrived = []
+                                seeded = st.setdefault("sigs_told", {})
+                                for sid in sigs_book.get(TAG or "(unknown)", {}):
+                                    seeded[sid] = now
                             # Whether a signature is NEW cannot be "is it
                             # in the file": the file is refreshed on its own
                             # twenty-second timer, so a spawn is usually
