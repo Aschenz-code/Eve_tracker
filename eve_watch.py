@@ -2406,6 +2406,62 @@ def sig_age(record):
         return None
 
 
+def near_id(a, b):
+    """Two signature ids that differ in exactly one character.
+
+    Same length and same shape, so this only ever pairs an id with a misread
+    of itself - "FOO-373" against "FOD-373", a D read as an O. Both letters
+    are legal in that position, so no glyph repair can tell them apart.
+    """
+    if len(a) != len(b) or a == b:
+        return False
+    return sum(1 for x, y in zip(a, b) if x != y) == 1
+
+
+def fold_misread(mine, exact, pasted, told, now):
+    """Fold an OCR'd id into the exact one a paste just gave for it.
+
+    A paste is the COMPLETE list of what is in the system, which is what makes
+    this safe: a stored id that the paste does not mention has either gone or
+    was never real. One that also differs from a pasted id by a single
+    character is the second of those. Returns the id folded away, or None.
+
+    Two genuinely different signatures CAN differ by one character, so the
+    test is not similarity alone - it is similarity plus the paste's silence
+    about one of them.
+    """
+    for sid in sorted(mine):
+        rec = mine[sid]
+        if sid in pasted or not isinstance(rec, dict):
+            continue
+        if not rec.get("present", True) or not near_id(sid, exact):
+            continue
+        keep = mine.setdefault(exact, {"id": exact, "clients": [],
+                                       "present": True, "scanned": False,
+                                       "name": "", "type": "",
+                                       "first_seen": rec.get("first_seen"),
+                                       "last_seen": rec.get("last_seen")})
+        # The older sighting is when this signature actually appeared.
+        for field in ("first_seen",):
+            if rec.get(field) and (not keep.get(field)
+                                   or rec[field] < keep[field]):
+                keep[field] = rec[field]
+        for field in ("name", "type"):
+            if not keep.get(field) and rec.get(field):
+                keep[field] = rec[field]
+        if rec.get("scanned"):
+            keep["scanned"] = True
+        for c in rec.get("clients") or []:
+            if c not in keep.setdefault("clients", []):
+                keep["clients"].append(c)
+        # Whatever was said about the misreading was said about this one.
+        if sid in told:
+            told[exact] = min(told.get(exact, told[sid]), told[sid])
+        del mine[sid]
+        return sid
+    return None
+
+
 def sig_is_new(sid, mine, told, now):
     """Whether a signature is a fresh spawn worth announcing, and why not.
 
@@ -6400,8 +6456,18 @@ def cmd_watch(args):
                         # The panel may well have announced it already: it
                         # notices a spawn on its own, and a paste follows
                         # whenever you happen to make one.
-                        mine_now = sigs_book.get(TAG or "(unknown)", {})
+                        mine_now = sigs_book.setdefault(TAG or "(unknown)", {})
                         again, at = [], time.time()
+                        # A paste gives the exact ids, so it can correct what
+                        # was read off the panel: one signature read as two
+                        # different ids pinged twice, once per spelling.
+                        for k in sorted(fresh):
+                            was = fold_misread(mine_now, k, set(sigs),
+                                               sigs_told, at)
+                            if was:
+                                sigs_dirty = True
+                                log(f"   clipboard: {was} was a misreading of "
+                                    f"{k} - folded together")
                         for k in sorted(fresh):
                             new, why = sig_is_new(k, mine_now, sigs_told, at)
                             if new:
