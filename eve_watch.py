@@ -5890,6 +5890,14 @@ def cmd_watch(args):
         # "Name:" and "Ship:" on their own lines.
         st["arrived_who"] = []
         st["arrived_keys"] = []
+        # The first run has an empty seen-set, so everyone on the grid would
+        # look like an arrival. They are not: this is the first look.
+        if not st.get("pilots_seeded"):
+            st["pilots_seeded"] = True
+            st["pilots_seen"] = set(here)
+            if here:
+                log(f"   {name}: first look - {len(here)} pilot(s) already "
+                    f"here, not announced")
         for key in here - st["pilots_seen"]:
             # A pilot seen for the first time had no record when the hull was
             # read, so this contributed NOTHING and the alert fell back to the
@@ -6242,7 +6250,15 @@ def cmd_watch(args):
                                 + (f"   [{why}]" if why else ""))
                             record_event(started, name, "depart", gone,
                                          obs_dir=obs_dir)
-                        if arrived:
+                        # Either layer noticing something new is news. The
+                        # pilot pass runs on its own timer as well as on a
+                        # pixel arrival, so it often sees a pilot BEFORE the
+                        # pixels confirm the row - and its findings are wiped
+                        # at the start of its next run. The pixel arrival then
+                        # found nothing new from it and was suppressed as
+                        # already known, so that pilot was never announced at
+                        # all.
+                        if arrived or st.get("arrived_names"):
                             st["changes"] += len(arrived)
                             # Prefer the three-pass merged reading over the
                             # single-pass label: the label is what put
