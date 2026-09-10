@@ -1202,7 +1202,11 @@ NAME_OK = re.compile(r"^[0-9A-Za-z' -]+$")
 # exactly the ones cut off. These are matched as substrings for that reason,
 # and chosen not to appear in any hull name: "navy" and "command" are out
 # because Apocalypse Navy Issue and command ships exist.
-STATIONISH = ("adminis", "tribunal", "bureau", "logistic", "academy",
+# Short enough to survive EVE truncating the type column: a station read
+# as "Gallente Admini" lost the last letter of "adminis" and was taken
+# for a pilot. Both of these were observed being cut that way.
+STATIONISH = ("admini", "militar", "tribunal", "bureau", "logistic",
+              "academy",
               "assembly", "chemical", "warehouse", "testing", "manufact",
               "depository", "archives", "laboratory", "outpost", "treasury",
               "directive", "prison", "school", "foundry", "reprocess",
