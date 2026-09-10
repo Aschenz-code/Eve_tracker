@@ -1246,7 +1246,18 @@ def is_environment(name, ship):
     # "Star ..." in a Loki out of it too - scenery names its own type.
     head = (a.split() or [""])[0]
     tail = (b.split() or [""])[0]
-    if any(looks_like(head, term, 0.72) for term in SCENERY):
+    # A plain ratio, NOT looks_like: its prefix shortcut counts any prefix of
+    # three characters or more as a match, so the pilot "Astra Junk" matched
+    # "astrahus" and was written off as scenery - and the echo test below did
+    # not catch it, because "Astra" and "Astero" resemble each other for the
+    # very same reason the name matched. That shortcut belongs to header
+    # matching, where a truncated "Gro" really does mean "group".
+    # Measured over the names in the book, the highest a real pilot's first
+    # word scores against this vocabulary is 0.769, while a damaged scenery
+    # word needs 0.875 - "wormhoie", "astrahns". 0.85 sits between with room
+    # on both sides.
+    if any(difflib.SequenceMatcher(None, head, term).ratio() >= 0.85
+           for term in SCENERY):
         if difflib.SequenceMatcher(None, head, tail).ratio() >= 0.6:
             return True
     # A deployable names itself in either column - "Scanner Probe" against a
