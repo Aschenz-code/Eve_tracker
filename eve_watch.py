@@ -139,6 +139,8 @@ DEFAULTS = {
     # machine, so it belongs in the config, which is not shared.
     "webhook": None,
     "voice_name": None,      # substring of a TTS voice name, e.g. "Mark"
+    # {panel kind: [fragments]} every region of that kind also ignores
+    "shared_ignore": {},
     "clipboard_sigs": True,  # parse EVE probe-scanner pastes for exact signature data
     "nag_until_ack": False,  # keep repeating while an unacknowledged popup is up
 }
@@ -2120,14 +2122,23 @@ def is_noise_row(text):
 def region_settings(region, settings):
     """Settings with this region's own overrides applied.
 
-    `ignore` in particular must be per-region: it exists to drop permanent
-    scenery from the overview, but applied globally it also censored those same
-    objects out of the d-scan log - and inconsistently, since it only matched
-    when OCR happened to read the name cleanly.
+    `ignore` must not be one global list: applied to everything it censored
+    the same scenery out of the d-scan log too, and inconsistently, since it
+    only matched when OCR happened to read the name cleanly.
+
+    But a list per REGION leaves a newly calibrated client deaf to every
+    decision made for the others - a new one began with the four default
+    entries where the rest had twenty-six, so it would have announced the
+    corp mates, Drifters and structures the others had been told to skip. So
+    there is also a shared list per KIND of panel, which every region of that
+    kind inherits and its own list adds to. The d-scan keeps its own, because
+    the kinds do not share.
     """
     out = dict(settings)
-    if "ignore" in region:
-        out["ignore"] = region["ignore"]
+    kind = re.sub(r"\d+$", "", region.get("name") or "")
+    shared = (settings.get("shared_ignore") or {}).get(kind) or []
+    if "ignore" in region or shared:
+        out["ignore"] = keep_ignores(region.get("ignore") or [], shared)
     return out
 
 
