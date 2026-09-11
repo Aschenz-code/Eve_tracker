@@ -41,3 +41,4 @@ handoff.json
 handoff.json.tmp
 relay_sent
 relay_sent.tmp
+NORELAY.*

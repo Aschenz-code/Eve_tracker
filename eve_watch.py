@@ -90,6 +90,22 @@ def pause_path(client=None):
     return os.path.join(HERE, f"PAUSED.{slug(short_client(client))}")
 
 
+def relay_path(client):
+    """The file whose presence stops ONE client relaying to the channel.
+
+    A marker rather than a config entry, for the same reason the per-client
+    pause is one: changing the config tears the watcher down and stands a new
+    one up, and deciding not to broadcast a scout is no reason to go blind for
+    a few seconds. Its absence means relay, so a client says nothing new by
+    saying nothing.
+    """
+    return os.path.join(HERE, f"NORELAY.{slug(short_client(client))}")
+
+
+def relay_off(client):
+    return os.path.exists(relay_path(client))
+
+
 def paused_for(client):
     return os.path.exists(PAUSEFILE) or os.path.exists(pause_path(client))
 
@@ -4905,6 +4921,29 @@ def cmd_pick(args):
             pbtn.configure(command=toggle_alerts)
             paint_alerts()
             pbtn.grid(row=row, column=5, sticky="w", padx=(4, 0))
+
+            # Whether this client's contacts and signatures reach the channel.
+            # Separate from the alerts button on purpose: a scout you want to
+            # hear about yourself is not necessarily one the corp needs pinged
+            # about, and the other way round.
+            dbtn = tk.Button(body, width=13)
+
+            def toggle_relay(t=title, b=dbtn):
+                if relay_off(t):
+                    os.remove(relay_path(t))
+                else:
+                    with open(relay_path(t), "w", encoding="utf-8") as fh:
+                        fh.write(f"no relay {dt.datetime.now():%Y-%m-%d %H:%M:%S}")
+                paint_relay(t, b)
+
+            def paint_relay(t=title, b=dbtn):
+                off = relay_off(t)
+                b.configure(text=("Discord OFF" if off else "Discord on"),
+                            fg=("#b00" if off else "#060"))
+
+            dbtn.configure(command=toggle_relay)
+            paint_relay()
+            dbtn.grid(row=row, column=6, sticky="w", padx=(4, 0))
             row += 1
 
             # What a relayed alert should say about WHERE it came from. A corp
@@ -5328,6 +5367,8 @@ def cmd_watch(args):
     stable_needed = args.stable or s["stable"]
     if not getattr(args, "webhook", None):
         args.webhook = s.get("webhook") or None
+    relay_url = args.webhook
+    relay_quiet = None
     thr = s["threshold"]
     obs_dir = args.obs_dir or s.get("obs_dir")
     global VOICE
@@ -6438,6 +6479,14 @@ def cmd_watch(args):
                     fire(name, st, box, frame, "change", detail, phrase,
                          alarm=st["alert"])
                     st["ref"], st["cand"], st["count"] = st["cand"], None, 0
+
+            # One check answers it for every relay path there is, because
+            # all of them ask opts.webhook first.
+            quiet = relay_off(win["title"])
+            if quiet != relay_quiet:
+                relay_quiet = quiet
+                log(f"   discord relay {'OFF' if quiet else 'ON'} for this client")
+            args.webhook = None if quiet else relay_url
 
             ms = os.path.getmtime(MODEFILE) if os.path.exists(MODEFILE) else 0
             if ms != mode_stamp:
