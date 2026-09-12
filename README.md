@@ -28,6 +28,13 @@ Windows only. Python 3.12+.
 That's it — Save starts the watchers. A client cannot be ticked until it has been
 calibrated, and once calibrated it stays that way.
 
+**Widen the Probe Scanner's ID column first.** EVE clips a cell to its column,
+and a signature id is seven characters - three letters, a dash, three digits. A
+column a few pixels too narrow shows six, and a six-character id matches
+nothing, so every signature on that client is read and then discarded. Nothing
+says so until a signature spawns and no alert arrives. Drag the divider between
+**ID** and **Name** to the right until the ids are complete, then calibrate.
+
 Before calibrating, make sure **each list has at least two rows** in it. A list
 with fewer cannot reveal its row spacing; calibrate will say `ROW SPACING
 GUESSED` if it has to fall back. An empty d-scan is skipped entirely, because EVE
@@ -119,6 +126,60 @@ the last character or two and the entry still identifies them:
 
 A badly damaged reading - a glyph lost from the middle rather than the end -
 can still get past it and alert once.
+
+**Put it in `shared_ignore` rather than in one region.** A region's own list
+applies to that panel alone, so a client calibrated later starts with only the
+four default entries and announces everyone the rest were told to skip.
+`settings.shared_ignore` holds one list per KIND of panel, and every region of
+that kind inherits it - `overview2` and `overview3` included:
+
+    "settings": {
+      "shared_ignore": {
+        "overview": ["SomePilo", "Other Nam", "TICK", "Astrahus"]
+      }
+    }
+
+A corp ticker works as an entry too, which silences everyone in it at once.
+That depends on the corporation column being read, and it is the flakiest of
+the three, so the occasional pilot still gets through.
+
+## Sending alerts to Discord
+
+Create a webhook in the Discord channel (Channel settings, Integrations,
+Webhooks) and put its url in `config.json`:
+
+    "settings": { "webhook": "https://discord.com/api/webhooks/..." }
+
+Treat that url as a password: whoever has it can post to the channel as you.
+It belongs in `config.json`, which is not shared, and NOT on the command line,
+where every process listing on the machine can read it.
+
+Two kinds of thing are relayed, and nothing else - no structure counts, no
+"watcher lost a region":
+
+    **New contact** / **Undocked** / **Moved**        **New sig spawned**
+    Name: <who>                                       <the signature>
+    Ship: <what>                                      <the note>
+    Where: <the note>
+
+and, once a contact leaves, one line saying what became of them:
+**Docked**, **Warped off**, **Took the wormhole** or **Left**. Those are held
+for a few seconds first, because the structure counter that explains a
+departure only ticks after it.
+
+Set **Where** in the clients window, per client. Corp mates cannot tell one of
+your characters from another; where the contact turned up is the part they can
+act on.
+
+Each client also has a **Discord on/off** button there. A scout you want to
+hear about yourself is not necessarily one the corp needs pinged about.
+
+Identical messages are dropped for a couple of minutes, and there is a ceiling
+per minute across every client, so a row that flickers cannot flood the
+channel. Every alert writes one line saying what happened to it:
+
+    announcing [beep,voice,discord]: ...
+    announcing [beep,voice]: ...   [not relayed - same message 4s ago]
 
 ## Docking
 

@@ -134,6 +134,16 @@
     "max_drift": null,
     "voice_name": null,
     "clipboard_sigs": true,
-    "nag_until_ack": false
+    "nag_until_ack": false,
+    "client_interval": {
+      "EVE - Your Character": 0.5
+    },
+    "webhook": null,
+    "shared_ignore": {
+      "overview": [
+        "Some Friendly",
+        "TICK"
+      ]
+    }
   }
 }

@@ -1908,7 +1908,7 @@ def reconcile_pixels(st, frame, box, threshold, settings, label_fn,
             if now_label and now_label != label:
                 # Which of the two readings to keep. Taking the LATER one
                 # outright was wrong: three times over it threw away a clean
-                # "<name> Astero AXAPI" for a damaged reading of the same row
+                # "<name> Astero TICK" for a damaged reading of the same row
                 # that had lost the first letter and gained a bracket. Judge
                 # them the way every other reading here is judged and let the
                 # later one win only a TIE - which is exactly what the stale
@@ -2452,7 +2452,7 @@ def near_id(a, b):
     """Two signature ids that differ in exactly one character.
 
     Same length and same shape, so this only ever pairs an id with a misread
-    of itself - "FOO-373" against "FOD-373", a D read as an O. Both letters
+    of itself - "ABO-123" against "ABD-123", a D read as an O. Both letters
     are legal in that position, so no glyph repair can tell them apart.
     """
     if len(a) != len(b) or a == b:
